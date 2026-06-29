@@ -35,17 +35,19 @@ type ShoppingIntent = {
 
 type SearchResponse = {
   intent: ShoppingIntent;
-  delivery: {
-    city: string | null;
-    date: string | null;
-    isComplete: boolean;
-    missingFields: Array<"city" | "deliveryDate">;
-    note: string;
-  };
+  delivery: DeliveryInfo;
   assistantMessage: string;
   products: Product[];
   groups: ProductGroup[];
   error?: string;
+};
+
+type DeliveryInfo = {
+  city: string | null;
+  date: string | null;
+  isComplete: boolean;
+  missingFields: Array<"city" | "deliveryDate">;
+  note: string;
 };
 
 type ChatMessage = {
@@ -74,8 +76,18 @@ export function ChatShell() {
     },
   ]);
   const [cart, setCart] = useState<Product[]>([]);
+  const [latestDelivery, setLatestDelivery] = useState<DeliveryInfo | null>(null);
+  const [cartNotice, setCartNotice] = useState<string | null>(null);
 
   const cartIds = useMemo(() => new Set(cart.map((item) => item.id)), [cart]);
+  const subtotal = useMemo(
+    () =>
+      cart.reduce(
+        (total, product) => total + (typeof product.price === "number" ? product.price : 0),
+        0
+      ),
+    [cart]
+  );
 
   async function sendMessage(messageText: string) {
     const cleanQuery = messageText.trim();
@@ -110,6 +122,8 @@ export function ChatShell() {
       if (!response.ok) {
         throw new Error(data.error || "Product search failed.");
       }
+
+      setLatestDelivery(data.delivery);
 
       const assistantMessage: ChatMessage = {
         id: crypto.randomUUID(),
@@ -147,12 +161,14 @@ export function ChatShell() {
 
       return [...currentCart, product];
     });
+    setCartNotice("Added to cart.");
   }
 
   function removeFromCart(productId: string) {
     setCart((currentCart) =>
       currentCart.filter((product) => product.id !== productId)
     );
+    setCartNotice(null);
   }
 
   return (
@@ -355,9 +371,179 @@ export function ChatShell() {
               {error}
             </p>
           ) : null}
+
+          <CartReviewPanel
+            cart={cart}
+            subtotal={subtotal}
+            delivery={latestDelivery}
+            notice={cartNotice}
+            onRemove={removeFromCart}
+          />
         </footer>
       </div>
     </main>
+  );
+}
+
+function CartReviewPanel({
+  cart,
+  subtotal,
+  delivery,
+  notice,
+  onRemove,
+}: {
+  cart: Product[];
+  subtotal: number;
+  delivery: DeliveryInfo | null;
+  notice: string | null;
+  onRemove: (productId: string) => void;
+}) {
+  const missingDeliveryWarnings = getMissingDeliveryWarnings(delivery);
+
+  return (
+    <section
+      style={{
+        marginTop: "16px",
+        border: "1px solid rgba(255,212,0,0.45)",
+        background: "rgba(255,255,255,0.1)",
+        padding: "14px",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexWrap: "wrap",
+          alignItems: "center",
+        }}
+      >
+        <h2 style={{ margin: 0, fontSize: "18px" }}>Cart review</h2>
+        <strong style={{ color: "#FFD400" }}>
+          Subtotal: Rs. {subtotal.toLocaleString("en-LK")}
+        </strong>
+      </div>
+
+      {notice ? (
+        <p style={{ margin: "10px 0 0", color: "#FFD400", fontWeight: 800 }}>
+          {notice}
+        </p>
+      ) : null}
+
+      {cart.length === 0 ? (
+        <p style={{ margin: "10px 0 0", color: "rgba(255,255,255,0.76)" }}>
+          Add a product to review it before opening Kapruka.
+        </p>
+      ) : (
+        <div style={{ display: "grid", gap: "10px", marginTop: "12px" }}>
+          {cart.map((product) => (
+            <div
+              key={product.id}
+              style={{
+                border: "1px solid rgba(255,255,255,0.14)",
+                background: "rgba(45,0,63,0.32)",
+                padding: "12px",
+                display: "grid",
+                gap: "8px",
+              }}
+            >
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1fr) auto",
+                  gap: "12px",
+                  alignItems: "flex-start",
+                }}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <h3
+                    style={{
+                      margin: 0,
+                      fontSize: "15px",
+                      lineHeight: 1.4,
+                      overflowWrap: "anywhere",
+                      whiteSpace: "normal",
+                    }}
+                  >
+                    {product.name}
+                  </h3>
+                  <p style={{ margin: "6px 0 0", color: "#FFD400", fontWeight: 900 }}>
+                    {product.priceText} · Qty 1
+                  </p>
+                  {product.stockStatus ? (
+                    <p style={{ margin: "6px 0 0", color: "rgba(255,255,255,0.76)" }}>
+                      {product.stockStatus}
+                    </p>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onRemove(product.id)}
+                  style={{
+                    border: "1px solid rgba(255,255,255,0.28)",
+                    background: "transparent",
+                    color: "white",
+                    padding: "8px 10px",
+                    cursor: "pointer",
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+              {product.url ? (
+                <a
+                  href={product.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{
+                    justifySelf: "start",
+                    background: "#FFD400",
+                    color: "#4B007D",
+                    padding: "10px 12px",
+                    textDecoration: "none",
+                    fontWeight: 900,
+                  }}
+                >
+                  Open product on Kapruka
+                </a>
+              ) : (
+                <span style={{ color: "rgba(255,255,255,0.72)" }}>
+                  Kapruka product URL unavailable.
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div
+        style={{
+          marginTop: "12px",
+          borderTop: "1px solid rgba(255,255,255,0.14)",
+          paddingTop: "12px",
+        }}
+      >
+        <h3 style={{ margin: "0 0 8px", fontSize: "15px" }}>Delivery summary</h3>
+        <p style={{ margin: 0, color: "rgba(255,255,255,0.8)" }}>
+          City: {delivery?.city || "Missing"} · Date: {delivery?.date || "Missing"}
+        </p>
+        {missingDeliveryWarnings.length > 0 ? (
+          <div style={{ marginTop: "8px", color: "#FFD400", fontWeight: 800 }}>
+            {missingDeliveryWarnings.map((warning) => (
+              <p key={warning} style={{ margin: "4px 0 0" }}>
+                {warning}
+              </p>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      {cart.length > 1 ? (
+        <p style={{ margin: "12px 0 0", color: "rgba(255,255,255,0.78)" }}>
+          For this prototype, open each selected product on Kapruka to complete checkout.
+        </p>
+      ) : null}
+    </section>
   );
 }
 
@@ -492,6 +678,18 @@ function formatBudget(intent: ShoppingIntent) {
   }
 
   return null;
+}
+
+function getMissingDeliveryWarnings(delivery: DeliveryInfo | null) {
+  if (!delivery || delivery.isComplete) {
+    return [];
+  }
+
+  return delivery.missingFields.map((field) =>
+    field === "city"
+      ? "Add a delivery city before checkout."
+      : "Add a delivery date before checkout."
+  );
 }
 
 function ProductCard({

@@ -21,7 +21,11 @@ export function groupProducts(
     (product) => typeof product.price === "number"
   );
 
-  const bestMatch = getBestMatch(uniqueProducts, query, context);
+  const bestMatch = getBestMatch(
+    preferCompleteNames(uniqueProducts),
+    query,
+    context
+  );
   const bestValue = getBestValue(productsWithPrices, bestMatch?.id || null);
   const premiumPick = getPremiumPick(
     productsWithPrices,
@@ -69,15 +73,41 @@ function getBestMatch(
 }
 
 function getBestValue(products: KaprukaProduct[], excludeId: string | null) {
-  return [...products]
-    .filter((product) => product.id !== excludeId)
-    .sort((a, b) => (a.price ?? 0) - (b.price ?? 0))[0] || null;
+  const candidates = products.filter((product) => product.id !== excludeId);
+
+  return preferCompleteNames(candidates)
+    .sort((a, b) => {
+      const priceDifference = (a.price ?? 0) - (b.price ?? 0);
+
+      if (priceDifference !== 0) {
+        return priceDifference;
+      }
+
+      return scoreNameQualityPenalty(a.name) - scoreNameQualityPenalty(b.name);
+    })[0] || null;
 }
 
 function getPremiumPick(products: KaprukaProduct[], excludeIds: Set<string>) {
-  return [...products]
-    .filter((product) => !excludeIds.has(product.id))
-    .sort((a, b) => (b.price ?? 0) - (a.price ?? 0))[0] || null;
+  const candidates = products.filter((product) => !excludeIds.has(product.id));
+
+  return preferCompleteNames(candidates)
+    .sort((a, b) => {
+      const priceDifference = (b.price ?? 0) - (a.price ?? 0);
+
+      if (priceDifference !== 0) {
+        return priceDifference;
+      }
+
+      return scoreNameQualityPenalty(a.name) - scoreNameQualityPenalty(b.name);
+    })[0] || null;
+}
+
+function preferCompleteNames(products: KaprukaProduct[]) {
+  const completeNameProducts = products.filter(
+    (product) => scoreNameQualityPenalty(product.name) === 0
+  );
+
+  return completeNameProducts.length > 0 ? completeNameProducts : products;
 }
 
 function dedupeProducts(products: KaprukaProduct[]) {
@@ -106,11 +136,12 @@ function scoreBestMatch(
     (score, word) => score + (nameWords.includes(word) ? 1 : 0),
     0
   );
+  const qualityPenalty = scoreNameQualityPenalty(product.name);
   const isDadChocolateGiftRequest =
     isDadRecipient(context) && isChocolateGiftRequest(context.requestText || "");
 
   if (!isDadChocolateGiftRequest) {
-    return keywordScore;
+    return keywordScore - qualityPenalty;
   }
 
   const recipientScore = scoreTerms(name, DAD_PREFERRED_TERMS) * 20;
@@ -119,7 +150,14 @@ function scoreBestMatch(
   const plainChocolatePenalty =
     chocolateScore > 0 && recipientScore === 0 && giftScore === 0 ? 15 : 0;
 
-  return keywordScore + recipientScore + giftScore + chocolateScore - plainChocolatePenalty;
+  return (
+    keywordScore +
+    recipientScore +
+    giftScore +
+    chocolateScore -
+    plainChocolatePenalty -
+    qualityPenalty
+  );
 }
 
 function tokenize(value: string) {
@@ -150,6 +188,23 @@ function scoreTerms(value: string, terms: string[]) {
   return terms.reduce((score, term) => score + (value.includes(term) ? 1 : 0), 0);
 }
 
+function scoreNameQualityPenalty(name: string) {
+  const normalized = name.toLowerCase().trim();
+
+  if (!normalized) {
+    return 100;
+  }
+
+  const looksTruncated = TRUNCATED_NAME_ENDINGS.some((ending) =>
+    normalized.endsWith(ending)
+  );
+  const hasBrokenEntity = BROKEN_ENTITY_MARKERS.some((marker) =>
+    normalized.includes(marker)
+  );
+
+  return (looksTruncated ? 0.2 : 0) + (hasBrokenEntity ? 0.3 : 0);
+}
+
 const DAD_PREFERRED_TERMS = ["dad", "father", "gentleman", "men", "him"];
 
 const GIFT_LIKE_TERMS = [
@@ -170,3 +225,20 @@ const CHOCOLATE_TERMS = [
   "rocher",
   "toblerone",
 ];
+
+const TRUNCATED_NAME_ENDINGS = [
+  "bouqu",
+  "cho",
+  "gift s",
+  "gift se",
+  "flower bouqu",
+  "red and pink roses bouquet wit",
+  "romantic luxury flower bouqu",
+  "with ribbon c",
+  "with rose",
+  "with 50 re",
+  "with 25 r",
+  "with 7 re",
+];
+
+const BROKEN_ENTITY_MARKERS = ["n#226", "n#8364", "n#8220", "n#8221"];
