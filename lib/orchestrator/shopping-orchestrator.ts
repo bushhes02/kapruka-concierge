@@ -4,6 +4,7 @@ import { groupProducts } from "@/lib/commerce/product-grouping";
 import { extractShoppingIntent } from "@/lib/ai/groq-client";
 import { generateKaviAssistantMessage } from "@/lib/ai/gemini-client";
 import type { ShoppingIntent } from "@/lib/ai/intent-schema";
+import { enrichKaprukaProducts } from "@/lib/kapruka/product-enrichment";
 import { searchKaprukaProducts } from "@/lib/kapruka/mcp-client";
 import type { KaprukaProduct } from "@/lib/kapruka/product-normalizer";
 
@@ -45,23 +46,67 @@ export async function runShoppingOrchestrator(
     recipient: intent.recipient,
     requestText: getIntentText(intent),
   });
+  const { products: enrichedProducts, groups: enrichedGroups } =
+    await enrichVisibleProducts(products, groups);
   const assistantMessage = await generateKaviAssistantMessage({
     intent,
     delivery,
-    groups,
+    groups: enrichedGroups,
   });
 
   return {
     intent,
     delivery,
     assistantMessage,
-    products,
-    groups,
+    products: enrichedProducts,
+    groups: enrichedGroups,
   };
 }
 
 function buildKaprukaQuery(intent: ShoppingIntent) {
   return intent.category || intent.searchQuery || intent.rawQuery;
+}
+
+async function enrichVisibleProducts(
+  products: KaprukaProduct[],
+  groups: ReturnType<typeof groupProducts>
+) {
+  const groupedProducts = groups
+    .map((group) => group.product)
+    .filter((product): product is KaprukaProduct => Boolean(product));
+  const visibleProducts = dedupeProductsForEnrichment([
+    ...groupedProducts,
+    ...products.slice(0, 8),
+  ]);
+  const enrichedVisibleProducts = await enrichKaprukaProducts(visibleProducts);
+  const enrichedById = new Map(
+    enrichedVisibleProducts.map((product) => [product.id, product])
+  );
+
+  return {
+    products: products.map((product) => enrichedById.get(product.id) || product),
+    groups: groups.map((group) => ({
+      ...group,
+      product: group.product
+        ? enrichedById.get(group.product.id) || group.product
+        : null,
+    })),
+  };
+}
+
+function dedupeProductsForEnrichment(products: KaprukaProduct[]) {
+  const seen = new Set<string>();
+
+  return products.filter((product) => {
+    const key = product.id || product.url || product.name;
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
 }
 
 async function getRelevantProducts(

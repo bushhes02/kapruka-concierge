@@ -1,9 +1,13 @@
 export type KaprukaProduct = {
   id: string;
   name: string;
+  displayName?: string | null;
   price: number | null;
   priceText: string;
   imageUrl: string | null;
+  displayImageUrl?: string | null;
+  description?: string | null;
+  sourceName?: string;
   stockStatus: string | null;
   url: string | null;
   raw: unknown;

@@ -13,6 +13,11 @@ type JsonRpcResponse = {
   };
 };
 
+type McpTool = {
+  name: string;
+  description?: string;
+};
+
 async function postMcp(payload: unknown, sessionId?: string) {
   const response = await fetch(KAPRUKA_MCP_URL, {
     method: "POST",
@@ -161,4 +166,56 @@ export async function searchKaprukaProducts(query: string): Promise<KaprukaProdu
   const toolPayload = extractToolResultPayload(searchResponse.data.result);
   
   return normalizeKaprukaProducts(toolPayload);
+}
+
+export async function listKaprukaMcpTools(): Promise<McpTool[]> {
+  const sessionId = await initializeMcp();
+
+  const toolsResponse = await postMcp(
+    {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/list",
+      params: {},
+    },
+    sessionId
+  );
+
+  if (toolsResponse.data.error) {
+    throw new Error(toolsResponse.data.error.message || "Kapruka tools/list failed.");
+  }
+
+  const result = toolsResponse.data.result;
+
+  if (!result || typeof result !== "object") {
+    return [];
+  }
+
+  const tools = (result as Record<string, unknown>).tools;
+
+  if (!Array.isArray(tools)) {
+    return [];
+  }
+
+  return tools
+    .map((tool): McpTool | null => {
+      if (!tool || typeof tool !== "object") {
+        return null;
+      }
+
+      const toolRecord = tool as Record<string, unknown>;
+
+      if (typeof toolRecord.name !== "string") {
+        return null;
+      }
+
+      return {
+        name: toolRecord.name,
+        description:
+          typeof toolRecord.description === "string"
+            ? toolRecord.description
+            : undefined,
+      };
+    })
+    .filter((tool): tool is McpTool => Boolean(tool));
 }
