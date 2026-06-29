@@ -9,15 +9,30 @@ import type { KaprukaProduct } from "@/lib/kapruka/product-normalizer";
 
 export type ShoppingOrchestratorResult = {
   intent: ShoppingIntent;
+  delivery: DeliveryInfo;
   assistantMessage: string;
   products: KaprukaProduct[];
   groups: ReturnType<typeof groupProducts>;
 };
 
+export type DeliveryInfo = {
+  city: string | null;
+  date: string | null;
+  isComplete: boolean;
+  missingFields: Array<"city" | "deliveryDate">;
+  note: string;
+};
+
 export async function runShoppingOrchestrator(
   rawQuery: string
 ): Promise<ShoppingOrchestratorResult> {
-  const intent = await extractShoppingIntent(rawQuery);
+  const extractedIntent = await extractShoppingIntent(rawQuery);
+  const delivery = resolveDeliveryInfo(extractedIntent);
+  const intent = {
+    ...extractedIntent,
+    city: delivery.city,
+    deliveryDate: delivery.date,
+  };
   const kaprukaQuery = buildKaprukaQuery(intent);
   const searchedProducts = await searchKaprukaProducts(kaprukaQuery);
   const relevantProducts = await getRelevantProducts(
@@ -32,11 +47,13 @@ export async function runShoppingOrchestrator(
   });
   const assistantMessage = await generateKaviAssistantMessage({
     intent,
+    delivery,
     groups,
   });
 
   return {
     intent,
+    delivery,
     assistantMessage,
     products,
     groups,
@@ -85,6 +102,144 @@ function filterProductsByBudget(
   return products.filter((product) => {
     return typeof product.price !== "number" || product.price <= intent.budgetMax!;
   });
+}
+
+function resolveDeliveryInfo(intent: ShoppingIntent): DeliveryInfo {
+  const requestText = getIntentText(intent);
+  const city = normalizeCity(intent.city) || extractCityFromRequest(intent.rawQuery);
+  const date = resolveDeliveryDate(intent.deliveryDate, requestText);
+  const missingFields: DeliveryInfo["missingFields"] = [];
+
+  if (!city) {
+    missingFields.push("city");
+  }
+
+  if (!date) {
+    missingFields.push("deliveryDate");
+  }
+
+  return {
+    city,
+    date,
+    isComplete: missingFields.length === 0,
+    missingFields,
+    note:
+      missingFields.length === 0
+        ? "Delivery city and date were resolved from the request."
+        : `Missing delivery ${missingFields.join(" and ")}.`,
+  };
+}
+
+function resolveDeliveryDate(groqDate: string | null, requestText: string) {
+  const today = getLocalDateOnly(new Date());
+
+  if (requestText.includes("day after tomorrow")) {
+    return formatDate(addDays(today, 2));
+  }
+
+  if (requestText.includes("tomorrow")) {
+    return formatDate(addDays(today, 1));
+  }
+
+  if (requestText.includes("today")) {
+    return formatDate(today);
+  }
+
+  const requestIsoDate = extractIsoDate(requestText);
+
+  if (requestIsoDate && !isBeforeDate(requestIsoDate, today)) {
+    return formatDate(requestIsoDate);
+  }
+
+  const normalizedGroqDate = parseIsoDate(groqDate);
+
+  if (normalizedGroqDate && !isBeforeDate(normalizedGroqDate, today)) {
+    return formatDate(normalizedGroqDate);
+  }
+
+  return null;
+}
+
+function getLocalDateOnly(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function addDays(date: Date, days: number) {
+  const nextDate = new Date(date);
+  nextDate.setDate(nextDate.getDate() + days);
+  return nextDate;
+}
+
+function extractIsoDate(value: string) {
+  const match = value.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+  return match ? parseIsoDate(match[0]) : null;
+}
+
+function parseIsoDate(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const match = value.trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return date;
+}
+
+function isBeforeDate(date: Date, comparisonDate: Date) {
+  return formatDate(date) < formatDate(comparisonDate);
+}
+
+function formatDate(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function normalizeCity(value: string | null) {
+  if (!value || normalize(value) === "null") {
+    return null;
+  }
+
+  return toTitleCase(value);
+}
+
+function extractCityFromRequest(rawQuery: string) {
+  const match = rawQuery.match(
+    /\b(?:to|in|near)\s+([a-zA-Z][a-zA-Z\s]+?)(?=\s+(?:today|tomorrow|day after tomorrow|on\s+\d{4}-\d{1,2}-\d{1,2})\b|$|[,.!?])/
+  );
+
+  if (!match?.[1]) {
+    return null;
+  }
+
+  return toTitleCase(match[1]);
+}
+
+function toTitleCase(value: string) {
+  return value
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
 }
 
 type CategoryRule = {

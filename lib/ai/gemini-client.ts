@@ -2,6 +2,7 @@ import "server-only";
 
 import type { ProductGroup } from "@/lib/commerce/product-grouping";
 import type { ShoppingIntent } from "@/lib/ai/intent-schema";
+import type { DeliveryInfo } from "@/lib/orchestrator/shopping-orchestrator";
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 
@@ -17,12 +18,14 @@ type GeminiGenerateContentResponse = {
 
 export async function generateKaviAssistantMessage({
   intent,
+  delivery,
   groups,
 }: {
   intent: ShoppingIntent;
+  delivery: DeliveryInfo;
   groups: ProductGroup[];
 }) {
-  const fallbackMessage = buildFallbackMessage(intent, groups);
+  const fallbackMessage = buildFallbackMessage(intent, delivery, groups);
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 
   if (!apiKey) {
@@ -49,6 +52,9 @@ export async function generateKaviAssistantMessage({
                 "Mention the recipient at most once, using natural phrasing like for your mum.",
                 "If searchQuery already contains the recipient, rewrite it as a clean product phrase before responding.",
                 "For cake requests, prefer this style: Of course — I found some lovely birthday cakes under Rs. 6,000 for your mum. Here are my top picks.",
+                "Only mention delivery city and date when they are provided in delivery.",
+                "If delivery is incomplete, politely ask for the missing delivery field after introducing the product picks.",
+                "Do not guarantee delivery availability or create orders.",
               ].join(" "),
             },
           ],
@@ -65,7 +71,7 @@ export async function generateKaviAssistantMessage({
                   recipient: intent.recipient,
                   category: intent.category,
                   budgetMax: intent.budgetMax,
-                  city: intent.city,
+                  delivery,
                   groupLabels: groups
                     .filter((group) => group.product)
                     .map((group) => group.label),
@@ -93,7 +99,11 @@ export async function generateKaviAssistantMessage({
   return text || fallbackMessage;
 }
 
-function buildFallbackMessage(intent: ShoppingIntent, groups: ProductGroup[]) {
+function buildFallbackMessage(
+  intent: ShoppingIntent,
+  delivery: DeliveryInfo,
+  groups: ProductGroup[]
+) {
   const productCount = groups.filter((group) => group.product).length;
   const budgetText =
     typeof intent.budgetMax === "number"
@@ -106,10 +116,10 @@ function buildFallbackMessage(intent: ShoppingIntent, groups: ProductGroup[]) {
   );
 
   if (productCount === 0) {
-    return `I understood your request for ${requestText}${budgetText}${recipientText}, but I could not find matching Kapruka products just yet.`;
+    return `I understood your request for ${requestText}${budgetText}${recipientText}, but I could not find matching Kapruka products just yet.${buildDeliveryFollowUp(delivery)}`;
   }
 
-  return `Of course — I found some lovely ${requestText}${budgetText}${recipientText}. Here are my top picks.`;
+  return `Of course — I found some lovely ${requestText}${budgetText}${recipientText}${formatResolvedDelivery(delivery)}. Here are my top picks.${buildDeliveryFollowUp(delivery)}`;
 }
 
 function normalizeRequestText(value: string, recipient: string | null) {
@@ -129,4 +139,24 @@ function normalizeRequestText(value: string, recipient: string | null) {
   }
 
   return normalized || "gift options";
+}
+
+function formatResolvedDelivery(delivery: DeliveryInfo) {
+  if (!delivery.city || !delivery.date) {
+    return "";
+  }
+
+  return ` for delivery to ${delivery.city} on ${delivery.date}`;
+}
+
+function buildDeliveryFollowUp(delivery: DeliveryInfo) {
+  if (delivery.isComplete || delivery.missingFields.length === 0) {
+    return "";
+  }
+
+  const missingText = delivery.missingFields
+    .map((field) => (field === "deliveryDate" ? "delivery date" : "delivery city"))
+    .join(" and ");
+
+  return ` I will also need the ${missingText} to continue.`;
 }

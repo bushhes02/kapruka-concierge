@@ -35,6 +35,13 @@ type ShoppingIntent = {
 
 type SearchResponse = {
   intent: ShoppingIntent;
+  delivery: {
+    city: string | null;
+    date: string | null;
+    isComplete: boolean;
+    missingFields: Array<"city" | "deliveryDate">;
+    note: string;
+  };
   assistantMessage: string;
   products: Product[];
   groups: ProductGroup[];
