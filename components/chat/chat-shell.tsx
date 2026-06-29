@@ -19,17 +19,31 @@ type ProductGroup = {
   product: Product | null;
 };
 
+type ShoppingIntent = {
+  rawQuery: string;
+  searchQuery: string | null;
+  occasion: string | null;
+  recipient: string | null;
+  category: string | null;
+  budgetMax: number | null;
+  budgetMin: number | null;
+  city: string | null;
+  deliveryDate: string | null;
+  urgency: "normal" | "urgent" | "scheduled" | null;
+  language: string | null;
+};
+
 type SearchResponse = {
-  query: string;
+  intent: ShoppingIntent;
   products: Product[];
   groups: ProductGroup[];
   error?: string;
 };
 
 const samplePrompts = [
-  "birthday gift",
-  "anniversary flowers",
-  "chocolate hamper",
+  "I need a birthday cake under 6000 for my mum",
+  "Send anniversary flowers to Colombo tomorrow",
+  "Chocolate hamper for my dad under 8000",
 ];
 
 export function ChatShell() {
@@ -53,7 +67,7 @@ export function ChatShell() {
     setError(null);
 
     try {
-      const response = await fetch("/api/kapruka/search", {
+      const response = await fetch("/api/rani/shopping", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -187,9 +201,9 @@ export function ChatShell() {
                 lineHeight: 1.7,
               }}
             >
-              Search Kapruka products using the server-side MCP connection. Rani
-              groups results deterministically into Best Match, Best Value, and
-              Premium Pick.
+              Tell Rani what you need in natural language. She extracts the
+              shopping intent with Groq, then searches and groups Kapruka
+              products with deterministic code.
             </p>
 
             <form
@@ -207,7 +221,7 @@ export function ChatShell() {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search for flowers, cake, hampers..."
+                placeholder="I need a birthday cake under 6000 for my mum"
                 style={{
                   flex: "1 1 280px",
                   borderRadius: "999px",
@@ -297,7 +311,7 @@ export function ChatShell() {
                 }}
               >
                 <h3 style={{ margin: 0, fontSize: "24px" }}>
-                  Results for “{results.query}”
+                  Results for “{results.intent.rawQuery}”
                 </h3>
                 <div
                   style={{
@@ -312,8 +326,11 @@ export function ChatShell() {
                 </div>
               </div>
 
+              <IntentSummary intent={results.intent} />
+
               <div
                 style={{
+                  marginTop: "18px",
                   display: "grid",
                   gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
                   gap: "16px",
@@ -368,6 +385,78 @@ export function ChatShell() {
       </div>
     </main>
   );
+}
+
+function IntentSummary({ intent }: { intent: ShoppingIntent }) {
+  const items = [
+    ["Search", intent.searchQuery],
+    ["Category", intent.category],
+    ["Occasion", intent.occasion],
+    ["Recipient", intent.recipient],
+    ["Budget", formatBudget(intent)],
+    ["City", intent.city],
+    ["Delivery", intent.deliveryDate],
+    ["Urgency", intent.urgency],
+    ["Language", intent.language],
+  ].filter(([, value]) => value);
+
+  if (items.length === 0) {
+    return null;
+  }
+
+  return (
+    <section
+      style={{
+        borderRadius: "20px",
+        border: "1px solid rgba(255,212,0,0.45)",
+        background: "rgba(255,212,0,0.12)",
+        padding: "16px",
+      }}
+    >
+      <h3 style={{ margin: "0 0 12px", color: "#FFD400", fontSize: "17px" }}>
+        Interpreted intent
+      </h3>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "10px",
+        }}
+      >
+        {items.map(([label, value]) => (
+          <div
+            key={label}
+            style={{
+              borderRadius: "999px",
+              background: "rgba(255,255,255,0.92)",
+              color: "#4B007D",
+              padding: "8px 12px",
+              fontSize: "13px",
+              fontWeight: 800,
+            }}
+          >
+            {label}: {value}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function formatBudget(intent: ShoppingIntent) {
+  if (intent.budgetMin !== null && intent.budgetMax !== null) {
+    return `Rs. ${intent.budgetMin.toLocaleString("en-LK")} - Rs. ${intent.budgetMax.toLocaleString("en-LK")}`;
+  }
+
+  if (intent.budgetMax !== null) {
+    return `Under Rs. ${intent.budgetMax.toLocaleString("en-LK")}`;
+  }
+
+  if (intent.budgetMin !== null) {
+    return `From Rs. ${intent.budgetMin.toLocaleString("en-LK")}`;
+  }
+
+  return null;
 }
 
 function ProductCard({
