@@ -6,16 +6,22 @@ export type ProductGroup = {
   product: KaprukaProduct | null;
 };
 
+export type ProductGroupingContext = {
+  recipient?: string | null;
+  requestText?: string;
+};
+
 export function groupProducts(
   products: KaprukaProduct[],
-  query: string
+  query: string,
+  context: ProductGroupingContext = {}
 ): ProductGroup[] {
   const uniqueProducts = dedupeProducts(products);
   const productsWithPrices = uniqueProducts.filter(
     (product) => typeof product.price === "number"
   );
 
-  const bestMatch = getBestMatch(uniqueProducts, query);
+  const bestMatch = getBestMatch(uniqueProducts, query, context);
   const bestValue = getBestValue(productsWithPrices, bestMatch?.id || null);
   const premiumPick = getPremiumPick(
     productsWithPrices,
@@ -41,12 +47,17 @@ export function groupProducts(
   ];
 }
 
-function getBestMatch(products: KaprukaProduct[], query: string) {
+function getBestMatch(
+  products: KaprukaProduct[],
+  query: string,
+  context: ProductGroupingContext
+) {
   const queryWords = tokenize(query);
 
   return [...products].sort((a, b) => {
     const scoreDifference =
-      scoreProductName(b.name, queryWords) - scoreProductName(a.name, queryWords);
+      scoreBestMatch(b, queryWords, context) -
+      scoreBestMatch(a, queryWords, context);
 
     if (scoreDifference !== 0) {
       return scoreDifference;
@@ -84,12 +95,31 @@ function dedupeProducts(products: KaprukaProduct[]) {
   });
 }
 
-function scoreProductName(name: string, queryWords: string[]) {
-  const nameWords = tokenize(name);
-  return queryWords.reduce(
+function scoreBestMatch(
+  product: KaprukaProduct,
+  queryWords: string[],
+  context: ProductGroupingContext
+) {
+  const name = product.name.toLowerCase();
+  const nameWords = tokenize(product.name);
+  const keywordScore = queryWords.reduce(
     (score, word) => score + (nameWords.includes(word) ? 1 : 0),
     0
   );
+  const isDadChocolateGiftRequest =
+    isDadRecipient(context) && isChocolateGiftRequest(context.requestText || "");
+
+  if (!isDadChocolateGiftRequest) {
+    return keywordScore;
+  }
+
+  const recipientScore = scoreTerms(name, DAD_PREFERRED_TERMS) * 20;
+  const giftScore = scoreTerms(name, GIFT_LIKE_TERMS) * 10;
+  const chocolateScore = scoreTerms(name, CHOCOLATE_TERMS) * 3;
+  const plainChocolatePenalty =
+    chocolateScore > 0 && recipientScore === 0 && giftScore === 0 ? 15 : 0;
+
+  return keywordScore + recipientScore + giftScore + chocolateScore - plainChocolatePenalty;
 }
 
 function tokenize(value: string) {
@@ -98,3 +128,45 @@ function tokenize(value: string) {
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
 }
+
+function isDadRecipient(context: ProductGroupingContext) {
+  const recipient = (context.recipient || "").toLowerCase();
+  const requestText = (context.requestText || "").toLowerCase();
+
+  return DAD_PREFERRED_TERMS.some(
+    (term) => recipient.includes(term) || requestText.includes(term)
+  );
+}
+
+function isChocolateGiftRequest(requestText: string) {
+  const normalized = requestText.toLowerCase();
+  return (
+    CHOCOLATE_TERMS.some((term) => normalized.includes(term)) &&
+    ["hamper", "gift", "box", "bouquet"].some((term) => normalized.includes(term))
+  );
+}
+
+function scoreTerms(value: string, terms: string[]) {
+  return terms.reduce((score, term) => score + (value.includes(term) ? 1 : 0), 0);
+}
+
+const DAD_PREFERRED_TERMS = ["dad", "father", "gentleman", "men", "him"];
+
+const GIFT_LIKE_TERMS = [
+  "gift box",
+  "gift set",
+  "hamper",
+  "bouquet",
+  "combo",
+  "personalized",
+];
+
+const CHOCOLATE_TERMS = [
+  "chocolate",
+  "chocolates",
+  "kitkat",
+  "cadbury",
+  "ferrero",
+  "rocher",
+  "toblerone",
+];

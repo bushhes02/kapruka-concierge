@@ -55,7 +55,7 @@ function normalizeText(value: unknown) {
   }
 
   const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  return trimmed.length > 0 && trimmed.toLowerCase() !== "null" ? trimmed : null;
 }
 
 function normalizeMoney(value: unknown) {
