@@ -49,6 +49,8 @@ export async function generateKaviAssistantMessage({
                 "Do not choose, rank, invent, or modify products.",
                 "Do not mention product names, prices, stock, URLs, checkout, or delivery promises.",
                 "Use only the provided intent and product group labels.",
+                "Use natural category labels: cakes, flowers, chocolate gifts, or gifts.",
+                "Do not repeat raw searchQuery phrases with city or recipient words attached.",
                 "Mention the recipient at most once, using natural phrasing like for your mum.",
                 "If searchQuery already contains the recipient, rewrite it as a clean product phrase before responding.",
                 "For cake requests, prefer this style: Of course — I found some lovely birthday cakes under Rs. 6,000 for your mum. Here are my top picks.",
@@ -110,43 +112,63 @@ function buildFallbackMessage(
       ? ` under Rs. ${intent.budgetMax.toLocaleString("en-LK")}`
       : "";
   const recipientText = intent.recipient ? ` for your ${intent.recipient}` : "";
-  const requestText = normalizeRequestText(
-    intent.searchQuery || intent.category || "gift options",
-    intent.recipient
-  );
+  const requestText = getDisplayCategory(intent);
 
   if (productCount === 0) {
     return `I understood your request for ${requestText}${budgetText}${recipientText}, but I could not find matching Kapruka products just yet.${buildDeliveryFollowUp(delivery)}`;
   }
 
-  return `Of course — I found some lovely ${requestText}${budgetText}${recipientText}${formatResolvedDelivery(delivery)}. Here are my top picks.${buildDeliveryFollowUp(delivery)}`;
+  return `Of course — I found some lovely ${requestText}${budgetText}${recipientText}${formatDeliveryContext(delivery)}. Here are my top picks.${buildDeliveryFollowUp(delivery)}`;
 }
 
-function normalizeRequestText(value: string, recipient: string | null) {
-  let normalized = value.trim().toLowerCase();
+function getDisplayCategory(intent: ShoppingIntent) {
+  const text = [
+    intent.rawQuery,
+    intent.searchQuery,
+    intent.category,
+    intent.occasion,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 
-  if (recipient) {
-    const escapedRecipient = recipient.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    normalized = normalized
-      .replace(new RegExp(`\\s+for\\s+(your\\s+)?${escapedRecipient}\\b`, "gi"), "")
-      .replace(new RegExp(`\\b(your\\s+)?${escapedRecipient}\\b`, "gi"), "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-
-  if (normalized === "birthday cake" || normalized === "birthday cakes") {
+  if (text.includes("birthday") && text.includes("cake")) {
     return "birthday cakes";
   }
 
-  return normalized || "gift options";
-}
-
-function formatResolvedDelivery(delivery: DeliveryInfo) {
-  if (!delivery.city || !delivery.date) {
-    return "";
+  if (text.includes("cake")) {
+    return "cakes";
   }
 
-  return ` for delivery to ${delivery.city} on ${delivery.date}`;
+  if (text.includes("flower") || text.includes("rose") || text.includes("bouquet")) {
+    return text.includes("anniversary") ? "anniversary flowers" : "flowers";
+  }
+
+  if (
+    text.includes("chocolate") ||
+    text.includes("hamper") ||
+    text.includes("confectionery")
+  ) {
+    return "chocolate gifts";
+  }
+
+  return "gifts";
+}
+
+function formatDeliveryContext(delivery: DeliveryInfo) {
+  if (delivery.city && delivery.date) {
+    return ` for delivery to ${delivery.city} on ${delivery.date}`;
+  }
+
+  if (delivery.city) {
+    return ` for delivery to ${delivery.city}`;
+  }
+
+  if (delivery.date) {
+    return ` for ${formatRelativeOrIsoDate(delivery.date)}`;
+  }
+
+  return "";
 }
 
 function buildDeliveryFollowUp(delivery: DeliveryInfo) {
@@ -158,5 +180,29 @@ function buildDeliveryFollowUp(delivery: DeliveryInfo) {
     .map((field) => (field === "deliveryDate" ? "delivery date" : "delivery city"))
     .join(" and ");
 
-  return ` I will also need the ${missingText} to continue.`;
+  return ` I'll need the ${missingText} to continue.`;
+}
+
+function formatRelativeOrIsoDate(date: string) {
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+
+  if (date === formatDate(today)) {
+    return "today";
+  }
+
+  if (date === formatDate(tomorrow)) {
+    return "tomorrow";
+  }
+
+  return date;
+}
+
+function formatDate(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
 }

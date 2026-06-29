@@ -126,8 +126,14 @@ function resolveDeliveryInfo(intent: ShoppingIntent): DeliveryInfo {
     note:
       missingFields.length === 0
         ? "Delivery city and date were resolved from the request."
-        : `Missing delivery ${missingFields.join(" and ")}.`,
+        : `Missing ${formatMissingDeliveryFields(missingFields)}.`,
   };
+}
+
+function formatMissingDeliveryFields(fields: DeliveryInfo["missingFields"]) {
+  return fields
+    .map((field) => (field === "deliveryDate" ? "delivery date" : "delivery city"))
+    .join(" and ");
 }
 
 function resolveDeliveryDate(groqDate: string | null, requestText: string) {
