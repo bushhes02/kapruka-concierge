@@ -35,9 +35,17 @@ type ShoppingIntent = {
 
 type SearchResponse = {
   intent: ShoppingIntent;
+  assistantMessage: string;
   products: Product[];
   groups: ProductGroup[];
   error?: string;
+};
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  result?: SearchResponse;
 };
 
 const samplePrompts = [
@@ -50,19 +58,34 @@ export function ChatShell() {
   const [query, setQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [results, setResults] = useState<SearchResponse | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: "welcome",
+      role: "assistant",
+      content:
+        "Hi, I am Kavi by Kapruka. Tell me who you are shopping for, the occasion, and your budget.",
+    },
+  ]);
   const [cart, setCart] = useState<Product[]>([]);
 
   const cartIds = useMemo(() => new Set(cart.map((item) => item.id)), [cart]);
 
-  async function runSearch(searchQuery: string) {
-    const cleanQuery = searchQuery.trim();
+  async function sendMessage(messageText: string) {
+    const cleanQuery = messageText.trim();
 
     if (!cleanQuery) {
-      setError("Type a gift idea first.");
+      setError("Type a shopping request first.");
       return;
     }
 
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: cleanQuery,
+    };
+
+    setMessages((currentMessages) => [...currentMessages, userMessage]);
+    setQuery("");
     setIsSearching(true);
     setError(null);
 
@@ -81,13 +104,29 @@ export function ChatShell() {
         throw new Error(data.error || "Product search failed.");
       }
 
-      setResults(data);
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: data.assistantMessage,
+        result: data,
+      };
+
+      setMessages((currentMessages) => [...currentMessages, assistantMessage]);
     } catch (searchError) {
-      setError(
+      const message =
         searchError instanceof Error
           ? searchError.message
-          : "Product search failed."
-      );
+          : "Product search failed.";
+
+      setError(message);
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: message,
+        },
+      ]);
     } finally {
       setIsSearching(false);
     }
@@ -115,16 +154,15 @@ export function ChatShell() {
         minHeight: "100vh",
         background: "#4B007D",
         color: "white",
-        padding: "32px 24px",
+        padding: "24px",
         fontFamily: "Arial, Helvetica, sans-serif",
       }}
     >
       <div
         style={{
-          maxWidth: "1120px",
-          minHeight: "calc(100vh - 64px)",
+          maxWidth: "1040px",
+          minHeight: "calc(100vh - 48px)",
           margin: "0 auto",
-          borderRadius: "32px",
           border: "1px solid rgba(255,255,255,0.18)",
           background: "rgba(255,255,255,0.1)",
           boxShadow: "0 24px 80px rgba(0,0,0,0.28)",
@@ -136,254 +174,258 @@ export function ChatShell() {
         <header
           style={{
             borderBottom: "1px solid rgba(255,255,255,0.18)",
-            padding: "24px 32px",
+            padding: "20px 24px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "16px",
+            flexWrap: "wrap",
           }}
         >
-          <p
-            style={{
-              margin: 0,
-              color: "#FFD400",
-              fontSize: "14px",
-              fontWeight: 700,
-              letterSpacing: "0.28em",
-              textTransform: "uppercase",
-            }}
-          >
-            Kapruka AI
-          </p>
-          <h1
-            style={{
-              margin: "8px 0 0",
-              fontSize: "clamp(28px, 5vw, 44px)",
-              lineHeight: 1.1,
-            }}
-          >
-            Rani — Kapruka AI Gift Concierge
-          </h1>
-        </header>
-
-        <section style={{ padding: "40px 32px" }}>
-          <div style={{ maxWidth: "760px", margin: "0 auto", textAlign: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
             <div
               style={{
-                width: "72px",
-                height: "72px",
-                margin: "0 auto 24px",
-                borderRadius: "999px",
+                width: "46px",
+                height: "46px",
+                borderRadius: "50%",
                 background: "#FFD400",
                 color: "#4B007D",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                fontSize: "36px",
+                fontSize: "22px",
                 fontWeight: 900,
-                boxShadow: "0 16px 40px rgba(0,0,0,0.25)",
               }}
             >
-              R
+              K
             </div>
-
-            <h2
-              style={{
-                margin: 0,
-                fontSize: "clamp(34px, 6vw, 56px)",
-                lineHeight: 1,
-              }}
-            >
-              Find real Kapruka gifts
-            </h2>
-
-            <p
-              style={{
-                margin: "18px auto 0",
-                color: "rgba(255,255,255,0.86)",
-                fontSize: "17px",
-                lineHeight: 1.7,
-              }}
-            >
-              Tell Rani what you need in natural language. She extracts the
-              shopping intent with Groq, then searches and groups Kapruka
-              products with deterministic code.
-            </p>
-
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void runSearch(query);
-              }}
-              style={{
-                display: "flex",
-                gap: "12px",
-                marginTop: "28px",
-                flexWrap: "wrap",
-              }}
-            >
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="I need a birthday cake under 6000 for my mum"
+            <div>
+              <p
                 style={{
-                  flex: "1 1 280px",
-                  borderRadius: "999px",
-                  border: "1px solid rgba(255,255,255,0.24)",
-                  background: "rgba(255,255,255,0.96)",
-                  color: "#2D003F",
-                  padding: "15px 18px",
-                  fontSize: "16px",
-                  outline: "none",
-                }}
-              />
-              <button
-                type="submit"
-                disabled={isSearching}
-                style={{
-                  borderRadius: "999px",
-                  border: "none",
-                  background: "#FFD400",
-                  color: "#4B007D",
-                  padding: "15px 24px",
-                  fontSize: "16px",
+                  margin: 0,
+                  color: "#FFD400",
+                  fontSize: "12px",
                   fontWeight: 800,
+                  letterSpacing: "0.2em",
+                  textTransform: "uppercase",
+                }}
+              >
+                Kapruka Concierge
+              </p>
+              <h1 style={{ margin: "4px 0 0", fontSize: "28px", lineHeight: 1.1 }}>
+                Kavi by Kapruka
+              </h1>
+            </div>
+          </div>
+
+          <div
+            style={{
+              border: "1px solid rgba(255,212,0,0.55)",
+              padding: "10px 14px",
+              color: "#FFD400",
+              fontWeight: 900,
+            }}
+          >
+            Cart: {cart.length}
+          </div>
+        </header>
+
+        <section
+          style={{
+            flex: 1,
+            padding: "24px",
+            overflowY: "auto",
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
+            {messages.map((message) => (
+              <ChatBubble
+                key={message.id}
+                message={message}
+                cartIds={cartIds}
+                onAdd={addToCart}
+                onRemove={removeFromCart}
+              />
+            ))}
+
+            {isSearching ? (
+              <div style={{ display: "flex", justifyContent: "flex-start" }}>
+                <div
+                  style={{
+                    maxWidth: "76%",
+                    background: "rgba(255,255,255,0.16)",
+                    border: "1px solid rgba(255,255,255,0.16)",
+                    padding: "14px 16px",
+                  }}
+                >
+                  Kavi is checking Kapruka products...
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </section>
+
+        <footer
+          style={{
+            borderTop: "1px solid rgba(255,255,255,0.18)",
+            padding: "18px 24px 22px",
+            background: "rgba(45,0,63,0.36)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              gap: "10px",
+              flexWrap: "wrap",
+              marginBottom: "12px",
+            }}
+          >
+            {samplePrompts.map((prompt) => (
+              <button
+                key={prompt}
+                type="button"
+                disabled={isSearching}
+                onClick={() => void sendMessage(prompt)}
+                style={{
+                  border: "1px solid rgba(255,212,0,0.65)",
+                  background: "rgba(255,212,0,0.18)",
+                  color: "white",
+                  padding: "9px 12px",
+                  fontSize: "13px",
+                  fontWeight: 700,
                   cursor: isSearching ? "wait" : "pointer",
                 }}
               >
-                {isSearching ? "Searching..." : "Search"}
+                {prompt}
               </button>
-            </form>
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                gap: "10px",
-                flexWrap: "wrap",
-                marginTop: "16px",
-              }}
-            >
-              {samplePrompts.map((prompt) => (
-                <button
-                  key={prompt}
-                  type="button"
-                  disabled={isSearching}
-                  onClick={() => {
-                    setQuery(prompt);
-                    void runSearch(prompt);
-                  }}
-                  style={{
-                    borderRadius: "999px",
-                    border: "1px solid rgba(255,212,0,0.65)",
-                    background: "rgba(255,212,0,0.18)",
-                    color: "white",
-                    padding: "10px 14px",
-                    fontSize: "13px",
-                    fontWeight: 700,
-                    cursor: isSearching ? "wait" : "pointer",
-                  }}
-                >
-                  {prompt}
-                </button>
-              ))}
-            </div>
-
-            {error ? (
-              <p
-                style={{
-                  marginTop: "18px",
-                  color: "#FFD400",
-                  fontWeight: 700,
-                }}
-              >
-                {error}
-              </p>
-            ) : null}
+            ))}
           </div>
 
-          {results ? (
-            <div style={{ marginTop: "40px" }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: "16px",
-                  flexWrap: "wrap",
-                  marginBottom: "18px",
-                }}
-              >
-                <h3 style={{ margin: 0, fontSize: "24px" }}>
-                  Results for “{results.intent.rawQuery}”
-                </h3>
-                <div
-                  style={{
-                    borderRadius: "999px",
-                    border: "1px solid rgba(255,212,0,0.55)",
-                    padding: "10px 14px",
-                    color: "#FFD400",
-                    fontWeight: 800,
-                  }}
-                >
-                  Cart: {cart.length}
-                </div>
-              </div>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void sendMessage(query);
+            }}
+            style={{
+              display: "flex",
+              gap: "12px",
+              flexWrap: "wrap",
+            }}
+          >
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="I need a birthday cake under 6000 for my mum"
+              style={{
+                flex: "1 1 280px",
+                border: "1px solid rgba(255,255,255,0.24)",
+                background: "rgba(255,255,255,0.96)",
+                color: "#2D003F",
+                padding: "15px 16px",
+                fontSize: "16px",
+                outline: "none",
+              }}
+            />
+            <button
+              type="submit"
+              disabled={isSearching}
+              style={{
+                border: "none",
+                background: "#FFD400",
+                color: "#4B007D",
+                padding: "15px 22px",
+                fontSize: "16px",
+                fontWeight: 900,
+                cursor: isSearching ? "wait" : "pointer",
+              }}
+            >
+              {isSearching ? "Sending..." : "Send"}
+            </button>
+          </form>
 
-              <IntentSummary intent={results.intent} />
-
-              <div
-                style={{
-                  marginTop: "18px",
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-                  gap: "16px",
-                }}
-              >
-                {results.groups.map((group) =>
-                  group.product ? (
-                    <ProductCard
-                      key={`${group.label}-${group.product.id}`}
-                      product={group.product}
-                      label={group.label}
-                      reason={group.reason}
-                      isInCart={cartIds.has(group.product.id)}
-                      onAdd={() => addToCart(group.product as Product)}
-                      onRemove={() => removeFromCart(group.product?.id || "")}
-                    />
-                  ) : null
-                )}
-              </div>
-
-              {results.products.length > 0 ? (
-                <>
-                  <h3 style={{ margin: "34px 0 18px", fontSize: "22px" }}>
-                    More products
-                  </h3>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                      gap: "16px",
-                    }}
-                  >
-                    {results.products.map((product) => (
-                      <ProductCard
-                        key={product.id}
-                        product={product}
-                        isInCart={cartIds.has(product.id)}
-                        onAdd={() => addToCart(product)}
-                        onRemove={() => removeFromCart(product.id)}
-                      />
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <p style={{ color: "rgba(255,255,255,0.8)" }}>
-                  No products were returned for this search.
-                </p>
-              )}
-            </div>
+          {error ? (
+            <p style={{ margin: "12px 0 0", color: "#FFD400", fontWeight: 700 }}>
+              {error}
+            </p>
           ) : null}
-        </section>
+        </footer>
       </div>
     </main>
+  );
+}
+
+function ChatBubble({
+  message,
+  cartIds,
+  onAdd,
+  onRemove,
+}: {
+  message: ChatMessage;
+  cartIds: Set<string>;
+  onAdd: (product: Product) => void;
+  onRemove: (productId: string) => void;
+}) {
+  const isUser = message.role === "user";
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: isUser ? "flex-end" : "flex-start",
+      }}
+    >
+      <div
+        style={{
+          width: message.result ? "100%" : "auto",
+          maxWidth: message.result ? "100%" : "76%",
+        }}
+      >
+        <div
+          style={{
+            marginLeft: isUser ? "auto" : 0,
+            maxWidth: message.result ? "720px" : "100%",
+            background: isUser ? "#FFD400" : "rgba(255,255,255,0.16)",
+            color: isUser ? "#4B007D" : "white",
+            border: isUser
+              ? "1px solid #FFD400"
+              : "1px solid rgba(255,255,255,0.16)",
+            padding: "14px 16px",
+            fontSize: "15px",
+            lineHeight: 1.55,
+            fontWeight: isUser ? 800 : 500,
+          }}
+        >
+          {message.content}
+        </div>
+
+        {message.result ? (
+          <div style={{ marginTop: "14px" }}>
+            <IntentSummary intent={message.result.intent} />
+            <div
+              style={{
+                marginTop: "14px",
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))",
+                gap: "14px",
+              }}
+            >
+              {message.result.groups.map((group) =>
+                group.product ? (
+                  <ProductCard
+                    key={`${group.label}-${group.product.id}`}
+                    product={group.product}
+                    label={group.label}
+                    isInCart={cartIds.has(group.product.id)}
+                    onAdd={() => onAdd(group.product as Product)}
+                    onRemove={() => onRemove(group.product?.id || "")}
+                  />
+                ) : null
+              )}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -395,9 +437,6 @@ function IntentSummary({ intent }: { intent: ShoppingIntent }) {
     ["Recipient", intent.recipient],
     ["Budget", formatBudget(intent)],
     ["City", intent.city],
-    ["Delivery", intent.deliveryDate],
-    ["Urgency", intent.urgency],
-    ["Language", intent.language],
   ].filter(([, value]) => value);
 
   if (items.length === 0) {
@@ -405,41 +444,30 @@ function IntentSummary({ intent }: { intent: ShoppingIntent }) {
   }
 
   return (
-    <section
+    <div
       style={{
-        borderRadius: "20px",
         border: "1px solid rgba(255,212,0,0.45)",
         background: "rgba(255,212,0,0.12)",
-        padding: "16px",
+        padding: "12px",
       }}
     >
-      <h3 style={{ margin: "0 0 12px", color: "#FFD400", fontSize: "17px" }}>
-        Interpreted intent
-      </h3>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: "10px",
-        }}
-      >
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
         {items.map(([label, value]) => (
-          <div
+          <span
             key={label}
             style={{
-              borderRadius: "999px",
               background: "rgba(255,255,255,0.92)",
               color: "#4B007D",
-              padding: "8px 12px",
-              fontSize: "13px",
+              padding: "7px 10px",
+              fontSize: "12px",
               fontWeight: 800,
             }}
           >
             {label}: {value}
-          </div>
+          </span>
         ))}
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -462,14 +490,12 @@ function formatBudget(intent: ShoppingIntent) {
 function ProductCard({
   product,
   label,
-  reason,
   isInCart,
   onAdd,
   onRemove,
 }: {
   product: Product;
-  label?: string;
-  reason?: string;
+  label: string;
   isInCart: boolean;
   onAdd: () => void;
   onRemove: () => void;
@@ -477,59 +503,36 @@ function ProductCard({
   return (
     <article
       style={{
-        borderRadius: "24px",
-        border: label
-          ? "1px solid rgba(255,212,0,0.72)"
-          : "1px solid rgba(255,255,255,0.16)",
+        border: "1px solid rgba(255,212,0,0.72)",
         background: "rgba(255,255,255,0.12)",
-        padding: "16px",
+        padding: "14px",
         display: "flex",
         flexDirection: "column",
         gap: "12px",
       }}
     >
-      {label ? (
-        <div
-          style={{
-            alignSelf: "flex-start",
-            borderRadius: "999px",
-            background: "#FFD400",
-            color: "#4B007D",
-            padding: "6px 10px",
-            fontSize: "12px",
-            fontWeight: 900,
-          }}
-        >
-          {label}
-        </div>
-      ) : null}
-
       <div
         style={{
-          borderRadius: "18px",
-          background: "rgba(255,255,255,0.9)",
-          minHeight: "160px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          overflow: "hidden",
+          alignSelf: "flex-start",
+          background: "#FFD400",
+          color: "#4B007D",
+          padding: "6px 10px",
+          fontSize: "12px",
+          fontWeight: 900,
         }}
       >
-        {product.imageUrl ? (
-          <img
-            src={product.imageUrl}
-            alt={product.name}
-            style={{ width: "100%", height: "180px", objectFit: "contain" }}
-          />
-        ) : (
-          <span style={{ color: "#4B007D", fontWeight: 800 }}>No image</span>
-        )}
+        {label}
       </div>
 
       <div>
-        <h4 style={{ margin: 0, fontSize: "17px", lineHeight: 1.35 }}>
+        <h4 style={{ margin: 0, fontSize: "16px", lineHeight: 1.35 }}>
           {product.url ? (
-            <a href={product.url} target="_blank" rel="noreferrer" style={{ color: "white" }}>
+            <a
+              href={product.url}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "white" }}
+            >
               {product.name}
             </a>
           ) : (
@@ -544,11 +547,6 @@ function ProductCard({
             {product.stockStatus}
           </p>
         ) : null}
-        {reason ? (
-          <p style={{ margin: "10px 0 0", color: "rgba(255,255,255,0.78)", fontSize: "13px" }}>
-            {reason}
-          </p>
-        ) : null}
       </div>
 
       <button
@@ -556,11 +554,10 @@ function ProductCard({
         onClick={isInCart ? onRemove : onAdd}
         style={{
           marginTop: "auto",
-          borderRadius: "999px",
           border: "none",
           background: isInCart ? "rgba(255,255,255,0.92)" : "#FFD400",
           color: "#4B007D",
-          padding: "12px 16px",
+          padding: "12px 14px",
           fontWeight: 900,
           cursor: "pointer",
         }}

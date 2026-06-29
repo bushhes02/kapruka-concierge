@@ -18,14 +18,14 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result);
   } catch (error) {
-    console.error("Rani shopping orchestrator error", error);
+    console.error("Kavi shopping orchestrator error", error);
 
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "Rani shopping orchestration failed.",
+            : "Kavi shopping orchestration failed.",
       },
       { status: 500 }
     );

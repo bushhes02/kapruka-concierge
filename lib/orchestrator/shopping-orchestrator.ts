@@ -2,12 +2,14 @@ import "server-only";
 
 import { groupProducts } from "@/lib/commerce/product-grouping";
 import { extractShoppingIntent } from "@/lib/ai/groq-client";
+import { generateKaviAssistantMessage } from "@/lib/ai/gemini-client";
 import type { ShoppingIntent } from "@/lib/ai/intent-schema";
 import { searchKaprukaProducts } from "@/lib/kapruka/mcp-client";
 import type { KaprukaProduct } from "@/lib/kapruka/product-normalizer";
 
 export type ShoppingOrchestratorResult = {
   intent: ShoppingIntent;
+  assistantMessage: string;
   products: KaprukaProduct[];
   groups: ReturnType<typeof groupProducts>;
 };
@@ -20,13 +22,19 @@ export async function runShoppingOrchestrator(
   const searchedProducts = await searchKaprukaProducts(kaprukaQuery);
   const relevantProducts = await getRelevantProducts(
     searchedProducts,
-    intent
+    intent,
+    kaprukaQuery
   );
   const products = filterProductsByBudget(relevantProducts, intent);
   const groups = groupProducts(products, kaprukaQuery);
+  const assistantMessage = await generateKaviAssistantMessage({
+    intent,
+    groups,
+  });
 
   return {
     intent,
+    assistantMessage,
     products,
     groups,
   };
@@ -38,29 +46,27 @@ function buildKaprukaQuery(intent: ShoppingIntent) {
 
 async function getRelevantProducts(
   products: KaprukaProduct[],
-  intent: ShoppingIntent
+  intent: ShoppingIntent,
+  originalQuery: string
 ) {
   if (!isCakeIntent(intent) || isCakeAccessoryIntent(intent)) {
     return products;
   }
 
-  const relevantProducts = filterCakeProducts(products);
+  let mergedProducts = products;
+  let relevantProducts = filterCakeProducts(mergedProducts);
 
-  if (relevantProducts.length >= 3) {
-    return relevantProducts;
+  for (const fallbackQuery of buildCakeFallbackQueries(intent, originalQuery)) {
+    if (relevantProducts.length >= 3) {
+      break;
+    }
+
+    const fallbackProducts = await searchKaprukaProducts(fallbackQuery);
+    mergedProducts = mergeProducts(mergedProducts, fallbackProducts);
+    relevantProducts = filterCakeProducts(mergedProducts);
   }
 
-  const fallbackProducts = await searchKaprukaProducts(buildCakeFallbackQuery(intent));
-  const mergedProducts = mergeProducts(products, fallbackProducts);
-  const mergedRelevantProducts = filterCakeProducts(mergedProducts);
-
-  if (mergedRelevantProducts.length > 0) {
-    return mergedRelevantProducts;
-  }
-
-  return filterCakeProducts(products.length > 0 ? products : fallbackProducts, {
-    allowPcOnly: true,
-  });
+  return relevantProducts;
 }
 
 function filterProductsByBudget(
@@ -78,12 +84,15 @@ function filterProductsByBudget(
 
 function isCakeIntent(intent: ShoppingIntent) {
   const category = normalize(intent.category);
+  const requestText = normalize(
+    [intent.rawQuery, intent.searchQuery, intent.category].filter(Boolean).join(" ")
+  );
 
   return (
     category === "cake" ||
     category === "cakes" ||
     category.includes(" cakes") ||
-    normalize(intent.searchQuery).includes("cake")
+    requestText.includes("cake")
   );
 }
 
@@ -114,17 +123,12 @@ function isPartnerCategoryId(product: KaprukaProduct) {
 }
 
 function filterCakeProducts(
-  products: KaprukaProduct[],
-  options: { allowPcOnly?: boolean } = {}
+  products: KaprukaProduct[]
 ) {
   const relevantProducts = products.filter(isRelevantCakeProduct);
-  const nonPartnerCategoryProducts = relevantProducts.filter(
+  const preferredProducts = relevantProducts.filter(
     (product) => !isPartnerCategoryId(product)
   );
-  const preferredProducts =
-    nonPartnerCategoryProducts.length > 0 || !options.allowPcOnly
-      ? nonPartnerCategoryProducts
-      : relevantProducts;
 
   return preferredProducts.sort((a, b) => {
     const cakeIdDifference = Number(isCakeId(b)) - Number(isCakeId(a));
@@ -138,12 +142,20 @@ function filterCakeProducts(
   });
 }
 
-function buildCakeFallbackQuery(intent: ShoppingIntent) {
+function buildCakeFallbackQueries(intent: ShoppingIntent, originalQuery: string) {
   const requestText = normalize(
     [intent.rawQuery, intent.searchQuery, intent.category].filter(Boolean).join(" ")
   );
+  const fallbackQueries = requestText.includes("birthday")
+    ? ["birthday cake", "cake"]
+    : ["cake", "birthday cake"];
+  const normalizedOriginalQuery = normalize(originalQuery);
 
-  return requestText.includes("birthday") ? "birthday cake" : "cake";
+  return fallbackQueries.filter(
+    (query, index) =>
+      fallbackQueries.indexOf(query) === index &&
+      normalize(query) !== normalizedOriginalQuery
+  );
 }
 
 function mergeProducts(
@@ -207,4 +219,5 @@ const EDIBLE_CAKE_TERMS = [
   "bento cake",
   "gateaux",
   "cheesecake",
+  "birthday cake",
 ];

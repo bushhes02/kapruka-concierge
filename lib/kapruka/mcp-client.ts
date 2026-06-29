@@ -106,7 +106,7 @@ async function initializeMcp() {
       protocolVersion: "2024-11-05",
       capabilities: {},
       clientInfo: {
-        name: "rani-kapruka-concierge",
+        name: "kavi-kapruka-concierge",
         version: "0.1.0",
       },
     },
