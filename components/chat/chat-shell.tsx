@@ -72,16 +72,45 @@ type CheckoutDraft = {
     city: string | null;
     date: string | null;
   };
+  deliveryValidation: {
+    valid: boolean;
+    status: "valid" | "invalid" | "unavailable";
+    city: string | null;
+    date: string | null;
+    checkedCity: string | null;
+    checkedDate: string | null;
+    rate: number | null;
+    currency: string | null;
+    reason: string | null;
+    nextAvailableDate: string | null;
+    warnings: string[];
+    unavailableReason: string | null;
+  } | null;
+  checkoutDetails: CheckoutDetails;
   missingFields: string[];
   canConfirm: boolean;
   confirmationToken: string | null;
   warnings: string[];
 };
 
+type CheckoutDetails = {
+  recipientName: string;
+  recipientPhone: string;
+  deliveryAddress: string;
+  senderName: string;
+  giftMessage: string;
+};
+
+type CheckoutDeliveryDetails = {
+  city: string;
+  date: string;
+};
+
 type CheckoutConfirmResponse = {
   ok?: boolean;
   status?: string;
   message?: string;
+  checkoutResult?: unknown;
   error?: string;
 };
 
@@ -99,6 +128,12 @@ type CheckoutController = {
   draft: CheckoutDraft | null;
   error: string | null;
   message: string | null;
+  result: unknown;
+  details: CheckoutDetails;
+  deliveryDetails: CheckoutDeliveryDetails;
+  onDetailsChange: (details: CheckoutDetails) => void;
+  onDeliveryChange: (details: CheckoutDeliveryDetails) => void;
+  onUseNextAvailableDate: (date: string) => void;
   isReviewing: boolean;
   isConfirming: boolean;
   onReview: () => void;
@@ -132,6 +167,18 @@ export function ChatShell() {
   const [checkoutDraft, setCheckoutDraft] = useState<CheckoutDraft | null>(null);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [checkoutMessage, setCheckoutMessage] = useState<string | null>(null);
+  const [checkoutResult, setCheckoutResult] = useState<unknown>(null);
+  const [checkoutDetails, setCheckoutDetails] = useState<CheckoutDetails>({
+    recipientName: "",
+    recipientPhone: "",
+    deliveryAddress: "",
+    senderName: "",
+    giftMessage: "",
+  });
+  const [checkoutDelivery, setCheckoutDelivery] = useState<CheckoutDeliveryDetails>({
+    city: "",
+    date: "",
+  });
   const [isReviewingCheckout, setIsReviewingCheckout] = useState(false);
   const [isConfirmingCheckout, setIsConfirmingCheckout] = useState(false);
 
@@ -190,9 +237,14 @@ export function ChatShell() {
       }
 
       setLatestDelivery(data.delivery);
+      setCheckoutDelivery({
+        city: data.delivery.city || "",
+        date: data.delivery.date || "",
+      });
       setCheckoutDraft(null);
       setCheckoutMessage(null);
       setCheckoutError(null);
+      setCheckoutResult(null);
       setMessages((currentMessages) => [
         ...currentMessages,
         {
@@ -240,6 +292,7 @@ export function ChatShell() {
     setCheckoutDraft(null);
     setCheckoutMessage(null);
     setCheckoutError(null);
+    setCheckoutResult(null);
   }
 
   function removeFromCart(productId: string) {
@@ -257,6 +310,7 @@ export function ChatShell() {
     setCheckoutDraft(null);
     setCheckoutMessage(null);
     setCheckoutError(null);
+    setCheckoutResult(null);
   }
 
   function upsertCartSummaryMessage() {
@@ -271,10 +325,39 @@ export function ChatShell() {
     ]);
   }
 
-  async function reviewCheckout() {
+  function updateCheckoutDetails(details: CheckoutDetails) {
+    setCheckoutDetails(details);
+    setCheckoutMessage(null);
+    setCheckoutError(null);
+    setCheckoutResult(null);
+  }
+
+  function updateCheckoutDelivery(details: CheckoutDeliveryDetails) {
+    setCheckoutDelivery(details);
+    setCheckoutMessage(null);
+    setCheckoutError(null);
+    setCheckoutResult(null);
+  }
+
+  function useNextAvailableDate(date: string) {
+    const nextDelivery = {
+      ...checkoutDelivery,
+      date,
+    };
+
+    setCheckoutDelivery(nextDelivery);
+    setCheckoutDraft(null);
+    setCheckoutMessage(null);
+    setCheckoutError(null);
+    setCheckoutResult(null);
+    void reviewCheckout(nextDelivery);
+  }
+
+  async function reviewCheckout(deliveryForReview = checkoutDelivery) {
     setIsReviewingCheckout(true);
     setCheckoutError(null);
     setCheckoutMessage(null);
+    setCheckoutResult(null);
 
     try {
       const response = await fetch("/api/checkout/draft", {
@@ -285,9 +368,10 @@ export function ChatShell() {
         body: JSON.stringify({
           cartItems: cart,
           delivery: {
-            city: latestDelivery?.city || null,
-            date: latestDelivery?.date || null,
+            city: deliveryForReview.city || null,
+            date: deliveryForReview.date || null,
           },
+          checkoutDetails,
         }),
       });
       const data = (await response.json()) as {
@@ -338,6 +422,7 @@ export function ChatShell() {
         data.message ||
           "Checkout confirmation is ready, but order creation is not enabled yet."
       );
+      setCheckoutResult(data.checkoutResult || null);
     } catch (error) {
       setCheckoutError(
         error instanceof Error ? error.message : "Checkout confirmation failed."
@@ -351,6 +436,12 @@ export function ChatShell() {
     draft: checkoutDraft,
     error: checkoutError,
     message: checkoutMessage,
+    result: checkoutResult,
+    details: checkoutDetails,
+    deliveryDetails: checkoutDelivery,
+    onDetailsChange: updateCheckoutDetails,
+    onDeliveryChange: updateCheckoutDelivery,
+    onUseNextAvailableDate: useNextAvailableDate,
     isReviewing: isReviewingCheckout,
     isConfirming: isConfirmingCheckout,
     onReview: () => void reviewCheckout(),
@@ -390,7 +481,6 @@ export function ChatShell() {
                 key={message.id}
                 cart={cart}
                 subtotal={subtotal}
-                delivery={latestDelivery}
                 checkout={checkoutController}
               />
             ) : (
@@ -447,7 +537,6 @@ export function ChatShell() {
         <CartDrawer
           cart={cart}
           subtotal={subtotal}
-          delivery={latestDelivery}
           notice={cartNotice}
           checkout={checkoutController}
           onClose={() => setIsCartOpen(false)}
@@ -621,15 +710,13 @@ function GroupedProducts({
 function InlineCheckoutSummary({
   cart,
   subtotal,
-  delivery,
   checkout,
 }: {
   cart: Product[];
   subtotal: number;
-  delivery: DeliveryInfo | null;
   checkout: CheckoutController;
 }) {
-  const missingDeliveryWarnings = getMissingDeliveryWarnings(delivery);
+  const missingDeliveryWarnings = getCheckoutDeliveryWarnings(checkout.deliveryDetails);
 
   return (
     <article className="message assistant inline-checkout-message">
@@ -656,8 +743,8 @@ function InlineCheckoutSummary({
           <div className="inline-delivery">
             <span>Delivery</span>
             <p>
-              City: {delivery?.city || "Missing"} · Date:{" "}
-              {delivery?.date || "Missing"}
+              City: {checkout.deliveryDetails.city || "Missing"} · Date:{" "}
+              {checkout.deliveryDetails.date || "Missing"}
             </p>
             {missingDeliveryWarnings.map((warning) => (
               <p key={warning} className="warning">
@@ -680,7 +767,6 @@ function InlineCheckoutSummary({
 function CartDrawer({
   cart,
   subtotal,
-  delivery,
   notice,
   checkout,
   onClose,
@@ -688,13 +774,12 @@ function CartDrawer({
 }: {
   cart: Product[];
   subtotal: number;
-  delivery: DeliveryInfo | null;
   notice: string | null;
   checkout: CheckoutController;
   onClose: () => void;
   onRemove: (productId: string) => void;
 }) {
-  const missingDeliveryWarnings = getMissingDeliveryWarnings(delivery);
+  const missingDeliveryWarnings = getCheckoutDeliveryWarnings(checkout.deliveryDetails);
 
   return (
     <div className="drawer-layer">
@@ -730,7 +815,8 @@ function CartDrawer({
           <div className="delivery-box">
             <h3>Delivery summary</h3>
             <p>
-              City: {delivery?.city || "Missing"} · Date: {delivery?.date || "Missing"}
+              City: {checkout.deliveryDetails.city || "Missing"} · Date:{" "}
+              {checkout.deliveryDetails.date || "Missing"}
             </p>
             {missingDeliveryWarnings.map((warning) => (
               <p key={warning} className="warning">
@@ -760,6 +846,20 @@ function CheckoutPanel({
   cartLength: number;
   compact?: boolean;
 }) {
+  const needsCheckoutDetails =
+    checkout.draft?.missingFields.some((field) =>
+      [
+        "recipient name",
+        "recipient phone",
+        "valid recipient phone",
+        "delivery address",
+        "sender name",
+      ].includes(field)
+    ) || false;
+  const needsDeliveryCorrection =
+    checkout.draft?.deliveryValidation?.status === "invalid" ||
+    checkout.draft?.deliveryValidation?.status === "unavailable";
+
   return (
     <div className={compact ? "checkout-panel compact" : "checkout-panel"}>
       <p className="confirmation-gate">
@@ -789,10 +889,71 @@ function CheckoutPanel({
               {checkout.draft.delivery.date || "Missing date"}
             </p>
           </div>
+          {checkout.draft.deliveryValidation ? (
+            <div className="delivery-validation">
+              <strong>
+                {formatDeliveryValidationStatus(
+                  checkout.draft.deliveryValidation.status,
+                  checkout.draft.delivery.city,
+                  checkout.draft.delivery.date
+                )}
+              </strong>
+              <p>
+                {checkout.draft.deliveryValidation.checkedCity ||
+                  checkout.draft.delivery.city ||
+                  "Unknown city"}
+                {" · "}
+                {checkout.draft.deliveryValidation.checkedDate ||
+                  checkout.draft.delivery.date ||
+                  "Unknown date"}
+                {typeof checkout.draft.deliveryValidation.rate === "number"
+                  ? ` · Delivery Rs. ${checkout.draft.deliveryValidation.rate.toLocaleString("en-LK")}`
+                  : ""}
+              </p>
+              {checkout.draft.deliveryValidation.reason ? (
+                <p className="warning">{checkout.draft.deliveryValidation.reason}</p>
+              ) : null}
+              {checkout.draft.deliveryValidation.nextAvailableDate ? (
+                <div className="next-date-row">
+                  <p className="warning">
+                    Next available date: {checkout.draft.deliveryValidation.nextAvailableDate}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      checkout.onUseNextAvailableDate(
+                        checkout.draft?.deliveryValidation?.nextAvailableDate || ""
+                      )
+                    }
+                  >
+                    Use next available date
+                  </button>
+                </div>
+              ) : null}
+              {checkout.draft.deliveryValidation.unavailableReason ? (
+                <p className="handoff-note">
+                  {checkout.draft.deliveryValidation.unavailableReason}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          {needsDeliveryCorrection ? (
+            <DeliveryCorrectionForm checkout={checkout} />
+          ) : null}
           {checkout.draft.missingFields.length > 0 ? (
             <p className="warning">
               Missing: {checkout.draft.missingFields.join(", ")}.
             </p>
+          ) : null}
+          <p className="details-status">
+            Checkout details:{" "}
+            {needsCheckoutDetails ? "needed before confirmation" : "complete"}
+          </p>
+          {needsCheckoutDetails ? (
+            <CheckoutDetailsForm
+              details={checkout.details}
+              onChange={checkout.onDetailsChange}
+            />
           ) : null}
           {checkout.draft.warnings.map((warning) => (
             <p key={warning} className="handoff-note">
@@ -815,6 +976,128 @@ function CheckoutPanel({
       {checkout.message ? (
         <p className="checkout-message">{checkout.message}</p>
       ) : null}
+      {getCheckoutUrl(checkout.result) ? (
+        <div className="payment-link-box">
+          <a href={getCheckoutUrl(checkout.result) || "#"} target="_blank" rel="noreferrer">
+            Open Kapruka payment link
+          </a>
+          {getCheckoutExpiry(checkout.result) ? (
+            <p>Expires: {getCheckoutExpiry(checkout.result)}</p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function DeliveryCorrectionForm({
+  checkout,
+}: {
+  checkout: CheckoutController;
+}) {
+  return (
+    <div className="delivery-correction-form">
+      <h4>Adjust delivery</h4>
+      <p>Choose another date or city to continue.</p>
+      <label>
+        Delivery city
+        <input
+          value={checkout.deliveryDetails.city}
+          onChange={(event) =>
+            checkout.onDeliveryChange({
+              ...checkout.deliveryDetails,
+              city: event.target.value,
+            })
+          }
+        />
+      </label>
+      <label>
+        Delivery date
+        <input
+          type="date"
+          value={checkout.deliveryDetails.date}
+          onChange={(event) =>
+            checkout.onDeliveryChange({
+              ...checkout.deliveryDetails,
+              date: event.target.value,
+            })
+          }
+        />
+      </label>
+      <button
+        type="button"
+        className="review-button"
+        onClick={checkout.onReview}
+        disabled={checkout.isReviewing}
+      >
+        {checkout.isReviewing ? "Checking..." : "Recheck delivery"}
+      </button>
+    </div>
+  );
+}
+
+function CheckoutDetailsForm({
+  details,
+  onChange,
+}: {
+  details: CheckoutDetails;
+  onChange: (details: CheckoutDetails) => void;
+}) {
+  function updateField(field: keyof CheckoutDetails, value: string) {
+    onChange({
+      ...details,
+      [field]: value,
+    });
+  }
+
+  return (
+    <div className="checkout-details-form">
+      <h4>Checkout details</h4>
+      <p>These details go only to checkout, not to Kavi or the AI models.</p>
+      <label>
+        Recipient name
+        <input
+          value={details.recipientName}
+          onChange={(event) => updateField("recipientName", event.target.value)}
+          autoComplete="name"
+        />
+      </label>
+      <label>
+        Recipient phone
+        <input
+          value={details.recipientPhone}
+          onChange={(event) => updateField("recipientPhone", event.target.value)}
+          autoComplete="tel"
+          inputMode="tel"
+          placeholder="0771234567"
+        />
+      </label>
+      <label>
+        Delivery address
+        <textarea
+          value={details.deliveryAddress}
+          onChange={(event) => updateField("deliveryAddress", event.target.value)}
+          rows={2}
+        />
+      </label>
+      <label>
+        Sender name
+        <input
+          value={details.senderName}
+          onChange={(event) => updateField("senderName", event.target.value)}
+          autoComplete="name"
+        />
+      </label>
+      <label>
+        Gift message <span>optional</span>
+        <textarea
+          value={details.giftMessage}
+          onChange={(event) => updateField("giftMessage", event.target.value)}
+          rows={2}
+          maxLength={300}
+        />
+      </label>
+      <p className="handoff-note">Click Review checkout again after saving details.</p>
     </div>
   );
 }
@@ -944,6 +1227,64 @@ function getMissingDeliveryWarnings(delivery: DeliveryInfo | null) {
       ? "Delivery city is missing."
       : "Delivery date is missing."
   );
+}
+
+function getCheckoutDeliveryWarnings(delivery: CheckoutDeliveryDetails) {
+  const warnings: string[] = [];
+
+  if (!delivery.city.trim()) {
+    warnings.push("Delivery city is missing.");
+  }
+
+  if (!delivery.date.trim()) {
+    warnings.push("Delivery date is missing.");
+  }
+
+  return warnings;
+}
+
+function formatDeliveryValidationStatus(
+  status: "valid" | "invalid" | "unavailable",
+  city: string | null,
+  date: string | null
+) {
+  if (status === "valid") {
+    return "Delivery available.";
+  }
+
+  if (status === "invalid") {
+    return `Delivery is not available for ${city || "this city"} on ${
+      date || "this date"
+    }.`;
+  }
+
+  return "Delivery validation could not be completed.";
+}
+
+function getCheckoutUrl(result: unknown) {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  const record = result as Record<string, unknown>;
+  const checkoutUrl = record.checkout_url;
+
+  return typeof checkoutUrl === "string" && checkoutUrl.trim()
+    ? checkoutUrl.trim()
+    : null;
+}
+
+function getCheckoutExpiry(result: unknown) {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  const record = result as Record<string, unknown>;
+  const expiresAt = record.expires_at;
+
+  return typeof expiresAt === "string" && expiresAt.trim()
+    ? expiresAt.trim()
+    : null;
 }
 
 function getProductDisplayName(product: Product) {
@@ -1740,6 +2081,171 @@ const styles = `
   .checkout-message {
     color: var(--kavi-purple);
     font-weight: 800;
+  }
+
+  .details-status {
+    margin: 9px 0 0;
+    color: #62586b;
+    font-size: 13px;
+    font-weight: 800;
+  }
+
+  .checkout-details-form {
+    margin-top: 10px;
+    display: grid;
+    gap: 9px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #fff;
+    padding: 12px;
+  }
+
+  .checkout-details-form h4 {
+    margin: 0;
+    color: var(--text);
+    font-size: 14px;
+  }
+
+  .checkout-details-form p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .checkout-details-form label {
+    display: grid;
+    gap: 5px;
+    color: #4a4053;
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .checkout-details-form label span {
+    color: var(--muted);
+    font-weight: 700;
+  }
+
+  .checkout-details-form input,
+  .checkout-details-form textarea {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--text);
+    background: #fff;
+    padding: 9px 10px;
+    font: inherit;
+    font-size: 13px;
+    resize: vertical;
+  }
+
+  .checkout-details-form input:focus,
+  .checkout-details-form textarea:focus {
+    outline: 2px solid rgba(75, 0, 125, 0.16);
+    border-color: #cab5d8;
+  }
+
+  .delivery-validation {
+    margin-top: 10px;
+    background: #faf8fb;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px;
+  }
+
+  .delivery-validation strong {
+    color: var(--kavi-purple);
+    font-size: 13px;
+  }
+
+  .delivery-validation p {
+    margin: 5px 0 0;
+    color: #62586b;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .next-date-row {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .next-date-row button {
+    justify-self: start;
+    border: 1px solid #e2d3eb;
+    background: #fff;
+    color: var(--kavi-purple);
+    border-radius: 999px;
+    padding: 7px 10px;
+    font-size: 12px;
+    font-weight: 900;
+    cursor: pointer;
+  }
+
+  .delivery-correction-form {
+    margin-top: 10px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #fff;
+    padding: 12px;
+    display: grid;
+    gap: 9px;
+  }
+
+  .delivery-correction-form h4 {
+    margin: 0;
+    color: var(--text);
+    font-size: 14px;
+  }
+
+  .delivery-correction-form p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .delivery-correction-form label {
+    display: grid;
+    gap: 5px;
+    color: #4a4053;
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .delivery-correction-form input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--text);
+    background: #fff;
+    padding: 9px 10px;
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .delivery-correction-form input:focus {
+    outline: 2px solid rgba(75, 0, 125, 0.16);
+    border-color: #cab5d8;
+  }
+
+  .payment-link-box {
+    margin-top: 10px;
+    border-radius: 12px;
+    background: var(--kavi-purple-soft);
+    padding: 10px;
+  }
+
+  .payment-link-box a {
+    color: var(--kavi-purple);
+    font-weight: 900;
+  }
+
+  .payment-link-box p {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 12px;
   }
 
   .checkout-error {

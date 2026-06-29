@@ -1,6 +1,11 @@
 import "server-only";
 
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
+
+import {
+  validateKaprukaDelivery,
+  type DeliveryValidationResult,
+} from "@/lib/checkout/delivery-validation";
 
 export type CheckoutDraftItemInput = {
   id?: unknown;
@@ -35,10 +40,28 @@ export type CheckoutDelivery = {
   date: string | null;
 };
 
+export type CheckoutDetailsInput = {
+  recipientName?: unknown;
+  recipientPhone?: unknown;
+  deliveryAddress?: unknown;
+  senderName?: unknown;
+  giftMessage?: unknown;
+};
+
+export type CheckoutDetails = {
+  recipientName: string | null;
+  recipientPhone: string | null;
+  deliveryAddress: string | null;
+  senderName: string | null;
+  giftMessage: string | null;
+};
+
 export type CheckoutDraft = {
   items: CheckoutDraftItem[];
   subtotal: number;
   delivery: CheckoutDelivery;
+  deliveryValidation: DeliveryValidationResult | null;
+  checkoutDetails: CheckoutDetails;
   missingFields: string[];
   canConfirm: boolean;
   confirmationToken: string | null;
@@ -47,21 +70,22 @@ export type CheckoutDraft = {
 
 type StoredCheckoutDraft = CheckoutDraft & {
   createdAt: number;
+  contentHash: string;
 };
 
 const draftStore = new Map<string, StoredCheckoutDraft>();
 const TOKEN_TTL_MS = 20 * 60 * 1000;
 
-export function createCheckoutDraft(input: {
+export async function createCheckoutDraft(input: {
   cartItems?: unknown;
   delivery?: CheckoutDeliveryInput | null;
-}): CheckoutDraft {
+  checkoutDetails?: CheckoutDetailsInput | null;
+}): Promise<CheckoutDraft> {
   pruneExpiredDrafts();
 
   const missingFields: string[] = [];
   const warnings: string[] = [
     "No order will be placed until you confirm.",
-    "Kapruka order creation is not enabled until MCP field mapping is verified.",
   ];
   const rawItems = Array.isArray(input.cartItems) ? input.cartItems : [];
   const items: CheckoutDraftItem[] = [];
@@ -82,6 +106,7 @@ export function createCheckoutDraft(input: {
   });
 
   const delivery = normalizeDelivery(input.delivery);
+  const checkoutDetails = normalizeCheckoutDetails(input.checkoutDetails);
 
   if (!delivery.city) {
     missingFields.push("delivery city");
@@ -91,13 +116,47 @@ export function createCheckoutDraft(input: {
     missingFields.push("delivery date");
   }
 
+  const deliveryValidation =
+    delivery.city && delivery.date
+      ? await validateKaprukaDelivery({
+          city: delivery.city,
+          date: delivery.date,
+          productId: items[0]?.id || null,
+        })
+      : null;
+
+  if (deliveryValidation) {
+    warnings.push(...deliveryValidation.warnings);
+  }
+
+  if (!checkoutDetails.recipientName) {
+    missingFields.push("recipient name");
+  }
+
+  if (!checkoutDetails.recipientPhone) {
+    missingFields.push("recipient phone");
+  } else if (!isValidSriLankaPhone(checkoutDetails.recipientPhone)) {
+    missingFields.push("valid recipient phone");
+  }
+
+  if (!checkoutDetails.deliveryAddress) {
+    missingFields.push("delivery address");
+  }
+
+  if (!checkoutDetails.senderName) {
+    missingFields.push("sender name");
+  }
+
   const subtotal = items.reduce((total, item) => total + item.price, 0);
-  const canConfirm = missingFields.length === 0;
+  const canConfirm =
+    missingFields.length === 0 && deliveryValidation?.status === "valid";
   const confirmationToken = canConfirm ? randomUUID() : null;
   const checkoutDraft: CheckoutDraft = {
     items,
     subtotal,
     delivery,
+    deliveryValidation,
+    checkoutDetails,
     missingFields,
     canConfirm,
     confirmationToken,
@@ -108,6 +167,7 @@ export function createCheckoutDraft(input: {
     draftStore.set(confirmationToken, {
       ...checkoutDraft,
       createdAt: Date.now(),
+      contentHash: hashDraftContent(checkoutDraft),
     });
   }
 
@@ -127,9 +187,39 @@ export function getCheckoutDraftByToken(token: unknown): CheckoutDraft | null {
     return null;
   }
 
-  const { createdAt: _createdAt, ...checkoutDraft } = storedDraft;
+  const { createdAt: _createdAt, contentHash: _contentHash, ...checkoutDraft } = storedDraft;
 
   return checkoutDraft;
+}
+
+export async function revalidateCheckoutDraft(
+  draft: CheckoutDraft
+): Promise<CheckoutDraft> {
+  const deliveryValidation =
+    draft.delivery.city && draft.delivery.date
+      ? await validateKaprukaDelivery({
+          city: draft.delivery.city,
+          date: draft.delivery.date,
+          productId: draft.items[0]?.id || null,
+        })
+      : null;
+  const missingFields = draft.missingFields.filter(
+    (field) => field !== "deliverable delivery city/date"
+  );
+
+  return {
+    ...draft,
+    deliveryValidation,
+    missingFields,
+    canConfirm:
+      missingFields.length === 0 && deliveryValidation?.status === "valid",
+    warnings: [
+      ...new Set([
+        ...draft.warnings,
+        ...(deliveryValidation?.warnings || []),
+      ]),
+    ],
+  };
 }
 
 function normalizeDraftItem(rawItem: unknown): CheckoutDraftItem | null {
@@ -169,6 +259,18 @@ function normalizeDelivery(delivery: CheckoutDeliveryInput | null | undefined) {
   };
 }
 
+function normalizeCheckoutDetails(
+  checkoutDetails: CheckoutDetailsInput | null | undefined
+) {
+  return {
+    recipientName: toTrimmedString(checkoutDetails?.recipientName),
+    recipientPhone: toTrimmedString(checkoutDetails?.recipientPhone),
+    deliveryAddress: toTrimmedString(checkoutDetails?.deliveryAddress),
+    senderName: toTrimmedString(checkoutDetails?.senderName),
+    giftMessage: toTrimmedString(checkoutDetails?.giftMessage),
+  };
+}
+
 function pruneExpiredDrafts() {
   const now = Date.now();
 
@@ -181,4 +283,26 @@ function pruneExpiredDrafts() {
 
 function toTrimmedString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isValidSriLankaPhone(phone: string) {
+  const normalized = phone.replace(/[\s()-]/g, "");
+
+  return /^(\+94|0)\d{9}$/.test(normalized) || /^\d{7,15}$/.test(normalized);
+}
+
+function hashDraftContent(draft: CheckoutDraft) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        items: draft.items.map((item) => ({
+          id: item.id,
+          price: item.price,
+        })),
+        delivery: draft.delivery,
+        checkoutDetails: draft.checkoutDetails,
+        subtotal: draft.subtotal,
+      })
+    )
+    .digest("hex");
 }

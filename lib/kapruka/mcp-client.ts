@@ -16,6 +16,7 @@ type JsonRpcResponse = {
 type McpTool = {
   name: string;
   description?: string;
+  inputSchema?: unknown;
 };
 
 async function postMcp(payload: unknown, sessionId?: string) {
@@ -73,7 +74,22 @@ function extractToolResultPayload(result: unknown): unknown {
   const resultRecord = result as Record<string, unknown>;
 
   if ("structuredContent" in resultRecord && resultRecord.structuredContent) {
-    return resultRecord.structuredContent;
+    const structuredContent = resultRecord.structuredContent;
+
+    if (structuredContent && typeof structuredContent === "object") {
+      const structuredRecord = structuredContent as Record<string, unknown>;
+      const nestedResult = structuredRecord.result;
+
+      if (typeof nestedResult === "string") {
+        try {
+          return JSON.parse(nestedResult);
+        } catch {
+          return nestedResult;
+        }
+      }
+    }
+
+    return structuredContent;
   }
 
   const content = resultRecord.content;
@@ -100,6 +116,27 @@ function extractToolResultPayload(result: unknown): unknown {
   }
 
   return result;
+}
+
+function summarizeInputSchema(inputSchema: unknown) {
+  if (!inputSchema || typeof inputSchema !== "object") {
+    return null;
+  }
+
+  const schema = inputSchema as Record<string, unknown>;
+  const properties = schema.properties;
+
+  if (!properties || typeof properties !== "object") {
+    return {
+      required: Array.isArray(schema.required) ? schema.required : [],
+      properties: [],
+    };
+  }
+
+  return {
+    required: Array.isArray(schema.required) ? schema.required : [],
+    properties: Object.keys(properties),
+  };
 }
 
 async function initializeMcp() {
@@ -168,6 +205,32 @@ export async function searchKaprukaProducts(query: string): Promise<KaprukaProdu
   return normalizeKaprukaProducts(toolPayload);
 }
 
+export async function callKaprukaMcpTool(
+  name: string,
+  args: Record<string, unknown>
+): Promise<unknown> {
+  const sessionId = await initializeMcp();
+
+  const toolResponse = await postMcp(
+    {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name,
+        arguments: args,
+      },
+    },
+    sessionId
+  );
+
+  if (toolResponse.data.error) {
+    throw new Error(toolResponse.data.error.message || `${name} failed.`);
+  }
+
+  return extractToolResultPayload(toolResponse.data.result);
+}
+
 export async function listKaprukaMcpTools(): Promise<McpTool[]> {
   const sessionId = await initializeMcp();
 
@@ -215,7 +278,24 @@ export async function listKaprukaMcpTools(): Promise<McpTool[]> {
           typeof toolRecord.description === "string"
             ? toolRecord.description
             : undefined,
+        inputSchema: toolRecord.inputSchema,
       };
     })
     .filter((tool): tool is McpTool => Boolean(tool));
+}
+
+export async function logKaprukaMcpToolSummaries() {
+  if (process.env.NODE_ENV !== "development") {
+    return;
+  }
+
+  const tools = await listKaprukaMcpTools();
+
+  console.info(
+    "Kapruka MCP tool summaries",
+    tools.map((tool) => ({
+      name: tool.name,
+      schema: summarizeInputSchema(tool.inputSchema),
+    }))
+  );
 }

@@ -1,24 +1,17 @@
 import { NextResponse } from "next/server";
 
 import { createCheckoutDraft } from "@/lib/checkout/checkout-draft";
-import { listKaprukaMcpTools } from "@/lib/kapruka/mcp-client";
+import { logKaprukaMcpToolSummaries } from "@/lib/kapruka/mcp-client";
 
 export async function POST(request: Request) {
   try {
     if (process.env.NODE_ENV === "development") {
-      listKaprukaMcpTools()
-        .then((tools) => {
-          console.info(
-            "Kapruka MCP tools",
-            tools.map((tool) => tool.name)
-          );
-        })
-        .catch((error) => {
-          console.info(
-            "Kapruka MCP tools unavailable",
-            error instanceof Error ? error.message : "Unknown error"
-          );
-        });
+      logKaprukaMcpToolSummaries().catch((error) => {
+        console.info(
+          "Kapruka MCP tools unavailable",
+          error instanceof Error ? error.message : "Unknown error"
+        );
+      });
     }
 
     const body = (await request.json()) as {
@@ -27,10 +20,18 @@ export async function POST(request: Request) {
         city?: unknown;
         date?: unknown;
       };
+      checkoutDetails?: {
+        recipientName?: unknown;
+        recipientPhone?: unknown;
+        deliveryAddress?: unknown;
+        senderName?: unknown;
+        giftMessage?: unknown;
+      };
     };
-    const checkoutDraft = createCheckoutDraft({
+    const checkoutDraft = await createCheckoutDraft({
       cartItems: body.cartItems,
       delivery: body.delivery,
+      checkoutDetails: body.checkoutDetails,
     });
 
     return NextResponse.json({ checkoutDraft });
