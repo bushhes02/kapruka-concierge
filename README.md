@@ -1,36 +1,86 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Kavi by Kapruka
 
-## Getting Started
+Kavi by Kapruka is a Sri Lankan shopping concierge built with Next.js. It uses Gemini for multilingual intent understanding and natural replies, Kapruka MCP for real product/order data, and deterministic TypeScript for routing, filtering, cart, delivery, and checkout safety.
 
-First, run the development server:
+## Architecture
+
+User message -> Gemini intent parser -> deterministic router -> Kapruka MCP -> product cards / cart / checkout
+
+## LLM roles
+
+- Gemini: multilingual intent extraction, natural assistant wording, gift message text
+- Groq: fallback intent extraction only if Gemini fails
+- TypeScript: validation, routing, grouping, cart, delivery, checkout safety
+- Kapruka MCP: real products, delivery validation, order creation, order tracking
+
+## Safety
+
+- No fake products
+- No fake prices
+- No fake orders
+- No fake payment links
+- Checkout stays behind a confirmation gate
+- Kapruka MCP calls stay server-side only
+- Checkout PII is not sent to LLMs
+
+## Local setup
+
+```bash
+npm install
+```
+
+Environment variables:
+
+```bash
+GOOGLE_GENERATIVE_AI_API_KEY=your_key
+GROQ_API_KEY=your_key_optional_if_fallback_used
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
+GEMINI_MODEL=gemini-2.5-flash
+GROQ_MODEL=llama-3.1-8b-instant
+```
+
+Run locally:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Build:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run build
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Demo flow
 
-## Learn More
+1. Search: `birthday cake for mum under 6000`
+2. Search: `amma ta birthday cake ekak one 6000 aduwen`
+3. Search: `appa ku chocolate hamper venum 8000 kulla`
+4. Search: `flowers to Colombo tomorrow`
+5. Add a product to cart
+6. Generate a gift message
+7. Review smart upsell options
+8. Check delivery
+9. Review checkout and confirm only after the gate is satisfied
+10. Track an order reference
 
-To learn more about Next.js, take a look at the following resources:
+## Deployment notes
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Set these environment variables in Vercel:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `GOOGLE_GENERATIVE_AI_API_KEY`
+- `GROQ_API_KEY` if you want fallback intent parsing
+- `NEXT_PUBLIC_SITE_URL`
 
-## Deploy on Vercel
+## Project layout
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- `app/api/agent/route.ts` - chat entrypoint
+- `app/api/checkout/draft/route.ts` - deterministic checkout draft
+- `app/api/checkout/confirm/route.ts` - explicit order confirmation path
+- `app/api/gift-message/route.ts` - gift message generation
+- `app/api/orders/track/route.ts` - order tracking
+- `app/api/upsell/route.ts` - deterministic upsell search
+- `lib/llm/intentParser.ts` - Gemini intent parser
+- `lib/agent/router.ts` - deterministic intent router
+- `lib/kapruka/mcp-client.ts` - Kapruka MCP client
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.

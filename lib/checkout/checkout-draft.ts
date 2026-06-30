@@ -46,6 +46,7 @@ export type CheckoutDetailsInput = {
   deliveryAddress?: unknown;
   senderName?: unknown;
   giftMessage?: unknown;
+  cakeIcingText?: unknown;
 };
 
 export type CheckoutDetails = {
@@ -54,6 +55,7 @@ export type CheckoutDetails = {
   deliveryAddress: string | null;
   senderName: string | null;
   giftMessage: string | null;
+  cakeIcingText: string | null;
 };
 
 export type CheckoutDraft = {
@@ -130,6 +132,8 @@ export async function createCheckoutDraft(input: {
   if (deliveryValidation) {
     warnings.push(...deliveryValidation.warnings);
   }
+
+  warnings.push(...getPerishableWarnings(items));
 
   const checkoutDetailErrors = validateCheckoutDetails(checkoutDetails);
 
@@ -264,6 +268,7 @@ export async function revalidateCheckoutDraft(
       ...new Set([
         ...draft.warnings,
         ...(deliveryValidation?.warnings || []),
+        ...getPerishableWarnings(draft.items),
       ]),
     ],
   };
@@ -315,6 +320,7 @@ function normalizeCheckoutDetails(
     deliveryAddress: toTrimmedString(checkoutDetails?.deliveryAddress),
     senderName: toTrimmedString(checkoutDetails?.senderName),
     giftMessage: toTrimmedString(checkoutDetails?.giftMessage),
+    cakeIcingText: toTrimmedString(checkoutDetails?.cakeIcingText),
   };
 }
 
@@ -390,8 +396,38 @@ function hashDraftContent(draft: CheckoutDraft) {
         })),
         delivery: draft.delivery,
         checkoutDetails: draft.checkoutDetails,
+        cakeIcingText: draft.checkoutDetails.cakeIcingText,
         subtotal: draft.subtotal,
       })
     )
     .digest("hex");
+}
+
+function getPerishableWarnings(items: CheckoutDraftItem[]) {
+  const names = items
+    .map((item) => `${item.id} ${item.name} ${item.displayName}`.toLowerCase())
+    .join(" | ");
+  const warnings = new Set<string>();
+
+  if (names.includes("cake")) {
+    warnings.add(
+      "Cake orders are time-sensitive. Please double-check delivery date, address, and recipient phone."
+    );
+  }
+
+  if (names.includes("flower") || names.includes("rose") || names.includes("bouquet")) {
+    warnings.add(
+      "Flower availability and freshness can depend on delivery date and location."
+    );
+  }
+
+  if (
+    ["chocolate", "hamper", "fruit", "food", "perishable"].some((term) =>
+      names.includes(term)
+    )
+  ) {
+    warnings.add("This item may be time-sensitive. Please confirm delivery details carefully.");
+  }
+
+  return Array.from(warnings);
 }

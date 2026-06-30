@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Product = {
   id: string;
@@ -25,16 +25,23 @@ type ProductGroup = {
 
 type ShoppingIntent = {
   rawQuery: string;
+  intentProvider?: "groq" | "gemini" | "fallback" | null;
+  detectedLanguage?: string | null;
+  languageStyle?: string | null;
+  translatedShoppingRequestEnglish?: string | null;
+  searchQueryEnglish?: string | null;
   searchQuery: string | null;
   occasion: string | null;
   recipient: string | null;
+  recipientNormalized?: string | null;
   category: string | null;
   budgetMax: number | null;
   budgetMin: number | null;
   city: string | null;
   deliveryDate: string | null;
-  urgency: "normal" | "urgent" | "scheduled" | null;
+  urgency: "today" | "tomorrow" | "scheduled" | "unknown" | null;
   language: string | null;
+  trackingReference?: string | null;
 };
 
 type DeliveryInfo = {
@@ -51,6 +58,14 @@ type SearchResponse = {
   assistantMessage: string;
   products: Product[];
   groups: ProductGroup[];
+  tracking?: {
+    found: boolean;
+    reference: string;
+    status: string | null;
+    message: string | null;
+    updatedAt: string | null;
+    raw: unknown;
+  } | null;
   error?: string;
 };
 
@@ -100,6 +115,7 @@ type CheckoutDetails = {
   deliveryAddress: string;
   senderName: string;
   giftMessage: string;
+  cakeIcingText: string;
 };
 
 type CheckoutDeliveryDetails = {
@@ -142,10 +158,17 @@ type CheckoutController = {
   onConfirm: () => void;
 };
 
+type UpsellResponse = {
+  category: string;
+  queries: string[];
+  products: Product[];
+};
+
 const samplePrompts = [
-  "I need a birthday cake under 6000 for my mum",
-  "Send anniversary flowers to Colombo tomorrow",
-  "Chocolate hamper for my dad under 8000",
+  "Birthday cake for Amma",
+  "Flowers to Colombo tomorrow",
+  "Chocolate gift for dad",
+  "Track my order",
 ];
 
 export function ChatShell() {
@@ -176,6 +199,7 @@ export function ChatShell() {
     deliveryAddress: "",
     senderName: "",
     giftMessage: "",
+    cakeIcingText: "",
   });
   const [checkoutDelivery, setCheckoutDelivery] = useState<CheckoutDeliveryDetails>({
     city: "",
@@ -183,6 +207,14 @@ export function ChatShell() {
   });
   const [isReviewingCheckout, setIsReviewingCheckout] = useState(false);
   const [isConfirmingCheckout, setIsConfirmingCheckout] = useState(false);
+  const [upsellProducts, setUpsellProducts] = useState<Product[]>([]);
+  const [isLoadingUpsell, setIsLoadingUpsell] = useState(false);
+  const [giftMessageError, setGiftMessageError] = useState<string | null>(null);
+  const [isGeneratingGiftMessage, setIsGeneratingGiftMessage] = useState(false);
+  const [trackingReference, setTrackingReference] = useState("");
+  const [trackingResult, setTrackingResult] = useState<SearchResponse["tracking"] | null>(null);
+  const [trackingError, setTrackingError] = useState<string | null>(null);
+  const [isTrackingOrder, setIsTrackingOrder] = useState(false);
 
   const cartIds = useMemo(() => new Set(cart.map((item) => item.id)), [cart]);
   const hasStartedShopping = messages.some((message) => message.role === "user");
@@ -199,6 +231,70 @@ export function ChatShell() {
       ),
     [cart]
   );
+  const latestShoppingIntent = useMemo(() => {
+    const latestMessageWithResult = [...messages].reverse().find((message) => message.result);
+    return latestMessageWithResult?.result?.intent || null;
+  }, [messages]);
+  const hasCakeCart = useMemo(
+    () =>
+      cart.some((product) =>
+        `${product.id} ${product.name} ${product.displayName || ""}`.toLowerCase().includes("cake")
+      ),
+    [cart]
+  );
+  const hasGiftableCart = useMemo(
+    () =>
+      cart.some((product) =>
+        !["grocery", "rice", "dhal", "lentils", "oil", "flour", "salt", "spice"].some((term) =>
+          `${product.id} ${product.name} ${product.displayName || ""}`.toLowerCase().includes(term)
+        )
+      ),
+    [cart]
+  );
+
+  useEffect(() => {
+    if (cart.length === 0) {
+      setUpsellProducts([]);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    setIsLoadingUpsell(true);
+
+    fetch("/api/upsell", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        cartItems: cart.map((item) => ({
+          id: item.id,
+          name: item.name,
+          price: item.price,
+          displayName: item.displayName,
+        })),
+      }),
+    })
+      .then(async (response) => {
+        const data = (await response.json()) as UpsellResponse & { error?: string };
+
+        if (!response.ok) {
+          throw new Error(data.error || "Upsell lookup failed.");
+        }
+
+        setUpsellProducts(data.products || []);
+      })
+      .catch(() => {
+        setUpsellProducts([]);
+      })
+      .finally(() => {
+        setIsLoadingUpsell(false);
+      });
+
+    return () => controller.abort();
+  }, [cart]);
 
   async function sendMessage(messageText: string) {
     const cleanQuery = messageText.trim();
@@ -221,6 +317,8 @@ export function ChatShell() {
     setIsSearching(true);
     setPipelineStep("understanding");
     setError(null);
+    setTrackingError(null);
+    setTrackingResult(null);
 
     const searchingTimer = window.setTimeout(() => {
       setPipelineStep("searching");
@@ -230,12 +328,19 @@ export function ChatShell() {
     }, 1300);
 
     try {
-      const response = await fetch("/api/rani/shopping", {
+      const response = await fetch("/api/agent", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ query: cleanQuery }),
+        body: JSON.stringify({
+          query: cleanQuery,
+          currentCart: cart.map((item) => ({
+            id: item.id,
+            name: item.name,
+            price: item.price,
+          })),
+        }),
       });
       const data = (await response.json()) as SearchResponse;
 
@@ -248,6 +353,10 @@ export function ChatShell() {
         city: data.delivery.city || "",
         date: data.delivery.date || "",
       });
+      if (data.tracking) {
+        setTrackingResult(data.tracking);
+        setTrackingReference(data.tracking.reference);
+      }
       setCheckoutDraft(null);
       setCheckoutMessage(null);
       setCheckoutError(null);
@@ -441,6 +550,86 @@ export function ChatShell() {
     }
   }
 
+  async function generateGiftMessage() {
+    setIsGeneratingGiftMessage(true);
+    setGiftMessageError(null);
+
+    try {
+      const response = await fetch("/api/gift-message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          rawQuery:
+            latestShoppingIntent?.rawQuery ||
+            [...messages].reverse().find((message) => message.role === "user")?.content ||
+            "",
+          occasion: latestShoppingIntent?.occasion || null,
+          recipientNormalized: latestShoppingIntent?.recipientNormalized || latestShoppingIntent?.recipient || null,
+          languageStyle: latestShoppingIntent?.languageStyle || "en",
+        }),
+      });
+      const data = (await response.json()) as { message?: string; error?: string };
+
+      if (!response.ok || !data.message) {
+        throw new Error(data.error || "Gift message generation failed.");
+      }
+
+      updateCheckoutDetails({
+        ...checkoutDetails,
+        giftMessage: data.message,
+      });
+    } catch (error) {
+      setGiftMessageError(
+        error instanceof Error ? error.message : "Gift message generation failed."
+      );
+    } finally {
+      setIsGeneratingGiftMessage(false);
+    }
+  }
+
+  async function trackOrder(reference = trackingReference) {
+    const cleanReference = reference.trim();
+
+    if (!cleanReference) {
+      setTrackingError("Please enter an order reference.");
+      return;
+    }
+
+    setIsTrackingOrder(true);
+    setTrackingError(null);
+
+    try {
+      const response = await fetch("/api/orders/track", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ reference: cleanReference }),
+      });
+      const data = (await response.json()) as { tracking?: SearchResponse["tracking"]; error?: string };
+
+      if (!response.ok || !data.tracking) {
+        throw new Error(
+          data.error ||
+            "I couldn't find tracking details for that reference. Please check the order number and try again."
+        );
+      }
+
+      setTrackingResult(data.tracking);
+      setTrackingReference(data.tracking.reference || cleanReference);
+    } catch (error) {
+      setTrackingError(
+        error instanceof Error
+          ? error.message
+          : "I couldn't find tracking details for that reference. Please check the order number and try again."
+      );
+    } finally {
+      setIsTrackingOrder(false);
+    }
+  }
+
   const checkoutController: CheckoutController = {
     draft: checkoutDraft,
     isDraftStale: isCheckoutDraftStale,
@@ -470,16 +659,26 @@ export function ChatShell() {
               <p>AI gift concierge</p>
             </div>
           </div>
-          <button
-            className="cart-button"
-            type="button"
-            onClick={() => setIsCartOpen((open) => !open)}
-            aria-label="Open cart"
-          >
-            <span className="cart-glyph" aria-hidden="true" />
-            <span>Cart</span>
-            <strong>{cart.length}</strong>
-          </button>
+          <div className="header-actions">
+            <button
+              className="header-link-button"
+              type="button"
+              onClick={() => sendMessage("track my order")}
+              aria-label="Track order"
+            >
+              Track order
+            </button>
+            <button
+              className="cart-button"
+              type="button"
+              onClick={() => setIsCartOpen((open) => !open)}
+              aria-label="Open cart"
+            >
+              <span className="cart-glyph" aria-hidden="true" />
+              <span>Cart</span>
+              <strong>{cart.length}</strong>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -520,6 +719,20 @@ export function ChatShell() {
                   checkout={checkoutController}
                   onRemove={removeFromCart}
                   title="Order summary"
+                  onGenerateGiftMessage={() => void generateGiftMessage()}
+                  isGeneratingGiftMessage={isGeneratingGiftMessage}
+                  giftMessageError={giftMessageError}
+                  showCakeIcingText={hasCakeCart}
+                  upsellProducts={upsellProducts}
+                  isLoadingUpsell={isLoadingUpsell}
+                  onAddUpsell={addToCart}
+                  trackingReference={trackingReference}
+                  onTrackingReferenceChange={setTrackingReference}
+                  onTrackOrder={() => void trackOrder()}
+                  isTrackingOrder={isTrackingOrder}
+                  trackingResult={trackingResult}
+                  trackingError={trackingError}
+                  hasGiftableCart={hasGiftableCart}
                 />
               </aside>
             ) : null}
@@ -559,6 +772,20 @@ export function ChatShell() {
           checkout={checkoutController}
           onClose={() => setIsCartOpen(false)}
           onRemove={removeFromCart}
+          onGenerateGiftMessage={() => void generateGiftMessage()}
+          isGeneratingGiftMessage={isGeneratingGiftMessage}
+          giftMessageError={giftMessageError}
+          showCakeIcingText={hasCakeCart}
+          upsellProducts={upsellProducts}
+          isLoadingUpsell={isLoadingUpsell}
+          onAddUpsell={addToCart}
+          trackingReference={trackingReference}
+          onTrackingReferenceChange={setTrackingReference}
+          onTrackOrder={() => void trackOrder()}
+          isTrackingOrder={isTrackingOrder}
+          trackingResult={trackingResult}
+          trackingError={trackingError}
+          hasGiftableCart={hasGiftableCart}
         />
       ) : null}
     </main>
@@ -587,10 +814,16 @@ function PipelineStatus({ activeStep }: { activeStep: PipelineStep }) {
   );
 }
 
-function PipelineComplete() {
+function PipelineComplete({
+  provider,
+}: {
+  provider?: ShoppingIntent["intentProvider"];
+}) {
+  const understoodBy = provider === "gemini" ? "Gemini" : "Groq";
+
   return (
     <div className="pipeline complete">
-      Understood by Groq <span /> Products from Kapruka <span /> Reply by Gemini
+      Understood by {understoodBy} <span /> Products from Kapruka <span /> Reply by Gemini
     </div>
   );
 }
@@ -611,7 +844,7 @@ function EmptyState({
       <div className="empty-state-inner">
         <div className="empty-brand">Kavi by Kapruka</div>
         <h2>What gift are we finding today?</h2>
-        <p>Ask for cakes, flowers, hampers, or gifts with budget and delivery details.</p>
+        <p>Search real Kapruka products with Kavi.</p>
         <Composer
           query={query}
           isSearching={isSearching}
@@ -713,18 +946,38 @@ function ChatBubble({
         </div>
         {message.result ? (
           <div className="result-block">
-            <PipelineComplete />
-            <IntentChips intent={message.result.intent} />
+            <details className="intent-disclosure">
+              <summary>How Kavi handled this</summary>
+              <PipelineComplete provider={message.result.intent.intentProvider} />
+              <IntentChips intent={message.result.intent} />
+            </details>
             <GroupedProducts
               response={message.result}
               cartIds={cartIds}
               onAdd={onAdd}
               onRemove={onRemove}
             />
+            {message.result.tracking ? (
+              <TrackingCard tracking={message.result.tracking} />
+            ) : null}
           </div>
         ) : null}
       </div>
     </article>
+  );
+}
+
+function TrackingCard({
+  tracking,
+}: {
+  tracking: NonNullable<SearchResponse["tracking"]>;
+}) {
+  return (
+    <div className="tracking-result inline">
+      <strong>{tracking.status || "Tracking updated"}</strong>
+      {tracking.message ? <p>{tracking.message}</p> : null}
+      {tracking.updatedAt ? <p>Updated: {tracking.updatedAt}</p> : null}
+    </div>
   );
 }
 
@@ -736,11 +989,11 @@ function IntentChips({ intent }: { intent: ShoppingIntent }) {
   const chips = [
     ["category", intent.category],
     ["occasion", intent.occasion],
-    ["recipient", intent.recipient],
+    ["recipient", intent.recipientNormalized || intent.recipient],
     ["city", intent.city],
     ["delivery", intent.deliveryDate],
     ["budget", formatBudget(intent)],
-    ["language", intent.language],
+    ["language", intent.languageStyle || intent.language || intent.detectedLanguage],
   ].filter(([, value]) => value);
 
   if (chips.length === 0) {
@@ -749,7 +1002,9 @@ function IntentChips({ intent }: { intent: ShoppingIntent }) {
 
   return (
     <section className="intent-panel">
-      <div className="intent-caption">Groq intent</div>
+      <div className="intent-caption">
+        {intent.intentProvider === "gemini" ? "Gemini intent" : "Groq intent"}
+      </div>
       <div className="intent-chips">
         {chips.map(([label, value]) => (
           <span key={label} className="intent-chip">
@@ -855,6 +1110,20 @@ function CartDrawer({
   checkout,
   onClose,
   onRemove,
+  onGenerateGiftMessage,
+  isGeneratingGiftMessage,
+  giftMessageError,
+  showCakeIcingText,
+  upsellProducts,
+  isLoadingUpsell,
+  onAddUpsell,
+  trackingReference,
+  onTrackingReferenceChange,
+  onTrackOrder,
+  isTrackingOrder,
+  trackingResult,
+  trackingError,
+  hasGiftableCart,
 }: {
   cart: Product[];
   subtotal: number;
@@ -862,6 +1131,20 @@ function CartDrawer({
   checkout: CheckoutController;
   onClose: () => void;
   onRemove: (productId: string) => void;
+  onGenerateGiftMessage: () => void;
+  isGeneratingGiftMessage: boolean;
+  giftMessageError: string | null;
+  showCakeIcingText: boolean;
+  upsellProducts: Product[];
+  isLoadingUpsell: boolean;
+  onAddUpsell: (product: Product) => void;
+  trackingReference: string;
+  onTrackingReferenceChange: (value: string) => void;
+  onTrackOrder: () => void;
+  isTrackingOrder: boolean;
+  trackingResult: SearchResponse["tracking"] | null;
+  trackingError: string | null;
+  hasGiftableCart: boolean;
 }) {
   return (
     <div className="drawer-layer">
@@ -875,6 +1158,20 @@ function CartDrawer({
           onRemove={onRemove}
           title="Cart"
           onClose={onClose}
+          onGenerateGiftMessage={onGenerateGiftMessage}
+          isGeneratingGiftMessage={isGeneratingGiftMessage}
+          giftMessageError={giftMessageError}
+          showCakeIcingText={showCakeIcingText}
+          upsellProducts={upsellProducts}
+          isLoadingUpsell={isLoadingUpsell}
+          onAddUpsell={onAddUpsell}
+          trackingReference={trackingReference}
+          onTrackingReferenceChange={onTrackingReferenceChange}
+          onTrackOrder={onTrackOrder}
+          isTrackingOrder={isTrackingOrder}
+          trackingResult={trackingResult}
+          trackingError={trackingError}
+          hasGiftableCart={hasGiftableCart}
         />
       </aside>
     </div>
@@ -889,6 +1186,20 @@ function CartPanelContent({
   onRemove,
   title,
   onClose,
+  onGenerateGiftMessage,
+  isGeneratingGiftMessage,
+  giftMessageError,
+  showCakeIcingText,
+  upsellProducts,
+  isLoadingUpsell,
+  onAddUpsell,
+  trackingReference,
+  onTrackingReferenceChange,
+  onTrackOrder,
+  isTrackingOrder,
+  trackingResult,
+  trackingError,
+  hasGiftableCart,
 }: {
   cart: Product[];
   subtotal: number;
@@ -897,8 +1208,25 @@ function CartPanelContent({
   onRemove: (productId: string) => void;
   title: string;
   onClose?: () => void;
+  onGenerateGiftMessage: () => void;
+  isGeneratingGiftMessage: boolean;
+  giftMessageError: string | null;
+  showCakeIcingText: boolean;
+  upsellProducts: Product[];
+  isLoadingUpsell: boolean;
+  onAddUpsell: (product: Product) => void;
+  trackingReference: string;
+  onTrackingReferenceChange: (value: string) => void;
+  onTrackOrder: () => void;
+  isTrackingOrder: boolean;
+  trackingResult: SearchResponse["tracking"] | null;
+  trackingError: string | null;
+  hasGiftableCart: boolean;
 }) {
-  const missingDeliveryWarnings = getCheckoutDeliveryWarnings(checkout.deliveryDetails);
+  const hasCartItems = cart.length > 0;
+  const hasDeliveryValues =
+    checkout.deliveryDetails.city.trim().length > 0 ||
+    checkout.deliveryDetails.date.trim().length > 0;
 
   return (
     <>
@@ -914,38 +1242,116 @@ function CartPanelContent({
         ) : null}
       </div>
 
-      {notice ? <p className="cart-notice">{notice}</p> : null}
-
       {cart.length === 0 ? (
-        <p className="empty-cart">Add products from Kavi's recommendations to review them here.</p>
-      ) : (
-        <div className="cart-items">
-          {cart.map((product) => (
-            <CartItem key={product.id} product={product} onRemove={onRemove} />
-          ))}
+        <div className="empty-cart-state">
+          <p className="empty-cart">Your cart is empty.</p>
+          <p className="handoff-note">Add a product to review delivery and checkout.</p>
         </div>
+      ) : (
+        <>
+          {notice ? <p className="cart-notice">{notice}</p> : null}
+          <div className="cart-items">
+            {cart.map((product) => (
+              <CartItem key={product.id} product={product} onRemove={onRemove} />
+            ))}
+          </div>
+        </>
       )}
 
-      <div className="cart-summary">
-        <div className="subtotal-row">
-          <span>Subtotal</span>
-          <strong>Rs. {subtotal.toLocaleString("en-LK")}</strong>
-        </div>
-        <div className="delivery-box">
-          <h3>Delivery summary</h3>
-          <p>
-            City: {checkout.deliveryDetails.city || "Missing"} · Date:{" "}
-            {checkout.deliveryDetails.date || "Missing"}
-          </p>
-          {missingDeliveryWarnings.map((warning) => (
-            <p key={warning} className="warning">
-              {warning}
-            </p>
-          ))}
-        </div>
+      {hasCartItems ? (
+        <div className="cart-summary">
+          <div className="subtotal-row">
+            <span>Subtotal</span>
+            <strong>Rs. {subtotal.toLocaleString("en-LK")}</strong>
+          </div>
+          <div className="delivery-box">
+            <h3>Delivery summary</h3>
+            {checkout.draft ? (
+              <>
+                <p>
+                  City: {checkout.draft.delivery.city || "Missing"} · Date:{" "}
+                  {checkout.draft.delivery.date || "Missing"}
+                </p>
+                {checkout.draft.deliveryValidation ? (
+                  <p className="handoff-note">
+                    {formatDeliveryValidationStatus(
+                      checkout.draft.deliveryValidation.status,
+                      checkout.draft.delivery.city,
+                      checkout.draft.delivery.date
+                    )}
+                  </p>
+                ) : null}
+                {checkout.draft.missingFields.length > 0 ? (
+                  <p className="warning">
+                    Missing: {checkout.draft.missingFields.join(", ")}.
+                  </p>
+                ) : null}
+                {checkout.draft.validationErrors.length > 0 ? (
+                  <p className="warning">{checkout.draft.validationErrors[0]}</p>
+                ) : null}
+              </>
+            ) : hasDeliveryValues ? (
+              <p>
+                City: {checkout.deliveryDetails.city || "Missing"} · Date:{" "}
+                {checkout.deliveryDetails.date || "Missing"}
+              </p>
+            ) : (
+              <p>Add delivery city and date to check availability.</p>
+            )}
+          </div>
 
-        <CheckoutPanel checkout={checkout} cartLength={cart.length} />
-      </div>
+          <div className="gift-box">
+            <div className="gift-box-head">
+              <h3>Gift message</h3>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={onGenerateGiftMessage}
+                disabled={isGeneratingGiftMessage || !hasGiftableCart}
+              >
+                {isGeneratingGiftMessage ? "Generating..." : "Generate"}
+              </button>
+            </div>
+            <p className="handoff-note">Optional. You can edit it before confirming.</p>
+            {giftMessageError ? <p className="warning">{giftMessageError}</p> : null}
+          </div>
+
+          {showCakeIcingText ? (
+            <div className="gift-box">
+              <h3>Cake icing</h3>
+              <p className="handoff-note">Short messages work best on cakes.</p>
+            </div>
+          ) : null}
+
+          {isLoadingUpsell ? <p className="handoff-note">Looking for add-ons...</p> : null}
+
+          {upsellProducts.length > 0 ? (
+            <div className="upsell-box">
+              <h3>You might also add</h3>
+              <div className="upsell-rail">
+                {upsellProducts.map((product) => (
+                  <ProductCard
+                    key={product.id}
+                    product={product}
+                    isInCart={cart.some((item) => item.id === product.id)}
+                    onAdd={() => onAddUpsell(product)}
+                    onRemove={() => onRemove(product.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <CheckoutPanel
+            checkout={checkout}
+            cartLength={cart.length}
+            showCakeIcingText={showCakeIcingText}
+            onGenerateGiftMessage={onGenerateGiftMessage}
+            isGeneratingGiftMessage={isGeneratingGiftMessage}
+            giftMessageError={giftMessageError}
+          />
+        </div>
+      ) : null}
     </>
   );
 }
@@ -954,10 +1360,18 @@ function CheckoutPanel({
   checkout,
   cartLength,
   compact = false,
+  showCakeIcingText,
+  onGenerateGiftMessage,
+  isGeneratingGiftMessage,
+  giftMessageError,
 }: {
   checkout: CheckoutController;
   cartLength: number;
   compact?: boolean;
+  showCakeIcingText: boolean;
+  onGenerateGiftMessage: () => void;
+  isGeneratingGiftMessage: boolean;
+  giftMessageError: string | null;
 }) {
   const needsCheckoutDetails =
     checkout.isDraftStale ||
@@ -971,7 +1385,9 @@ function CheckoutPanel({
       ].includes(field)
     ) || false;
   const showCheckoutDetailsForm =
-    needsCheckoutDetails || !isCheckoutDetailsLocallyComplete(checkout.details);
+    needsCheckoutDetails ||
+    !isCheckoutDetailsLocallyComplete(checkout.details) ||
+    showCakeIcingText;
   const needsDeliveryCorrection =
     checkout.draft?.deliveryValidation?.status === "invalid" ||
     checkout.draft?.deliveryValidation?.status === "unavailable";
@@ -988,6 +1404,10 @@ function CheckoutPanel({
         <CheckoutDetailsForm
           details={checkout.details}
           onChange={checkout.onDetailsChange}
+          showCakeIcingText={showCakeIcingText}
+          onGenerateGiftMessage={onGenerateGiftMessage}
+          isGeneratingGiftMessage={isGeneratingGiftMessage}
+          giftMessageError={giftMessageError}
         />
       ) : null}
 
@@ -1082,6 +1502,10 @@ function CheckoutPanel({
             <CheckoutDetailsForm
               details={checkout.details}
               onChange={checkout.onDetailsChange}
+              showCakeIcingText={showCakeIcingText}
+              onGenerateGiftMessage={onGenerateGiftMessage}
+              isGeneratingGiftMessage={isGeneratingGiftMessage}
+              giftMessageError={giftMessageError}
             />
           ) : null}
           {checkout.draft.warnings.map((warning) => (
@@ -1181,9 +1605,17 @@ function DeliveryCorrectionForm({
 function CheckoutDetailsForm({
   details,
   onChange,
+  showCakeIcingText,
+  onGenerateGiftMessage,
+  isGeneratingGiftMessage,
+  giftMessageError,
 }: {
   details: CheckoutDetails;
   onChange: (details: CheckoutDetails) => void;
+  showCakeIcingText?: boolean;
+  onGenerateGiftMessage?: () => void;
+  isGeneratingGiftMessage?: boolean;
+  giftMessageError?: string | null;
 }) {
   function updateField(field: keyof CheckoutDetails, value: string) {
     onChange({
@@ -1239,6 +1671,18 @@ function CheckoutDetailsForm({
           maxLength={300}
         />
       </label>
+      {showCakeIcingText ? (
+        <label>
+          Cake icing text <span>optional</span>
+          <textarea
+            value={details.cakeIcingText}
+            onChange={(event) => updateField("cakeIcingText", event.target.value)}
+            rows={2}
+            maxLength={40}
+          />
+          <small>Short messages work best on cakes.</small>
+        </label>
+      ) : null}
       <p className="handoff-note">Click Check delivery & review order after saving details.</p>
     </div>
   );
@@ -1394,7 +1838,8 @@ function areCheckoutDetailsEqual(
     (draftDetails.recipientPhone || "") === currentDetails.recipientPhone.trim() &&
     (draftDetails.deliveryAddress || "") === currentDetails.deliveryAddress.trim() &&
     (draftDetails.senderName || "") === currentDetails.senderName.trim() &&
-    (draftDetails.giftMessage || "") === currentDetails.giftMessage.trim()
+    (draftDetails.giftMessage || "") === currentDetails.giftMessage.trim() &&
+    (draftDetails.cakeIcingText || "") === currentDetails.cakeIcingText.trim()
   );
 }
 
@@ -1522,6 +1967,13 @@ const styles = `
     gap: 16px;
   }
 
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+  }
+
   .kavi-brand {
     display: flex;
     align-items: center;
@@ -1559,13 +2011,23 @@ const styles = `
     background: #fff;
     color: var(--kavi-purple);
     border-radius: 999px;
-    padding: 9px 12px;
+    padding: 8px 11px;
     font-weight: 800;
     display: inline-flex;
     align-items: center;
     gap: 8px;
     cursor: pointer;
     box-shadow: 0 6px 18px rgba(75, 0, 125, 0.08);
+  }
+
+  .header-link-button {
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+    padding: 0 2px;
   }
 
   .cart-button strong {
@@ -1747,7 +2209,9 @@ const styles = `
   }
 
   .pipeline.complete {
-    margin: 0 0 10px 42px;
+    margin: 0 0 8px;
+    font-size: 11px;
+    color: #877a91;
   }
 
   .pipeline.complete span::before {
@@ -1771,7 +2235,25 @@ const styles = `
   }
 
   .intent-panel {
+    margin: 0;
+  }
+
+  .intent-disclosure {
     margin: 0 0 12px 42px;
+  }
+
+  .intent-disclosure summary {
+    list-style: none;
+    cursor: pointer;
+    color: #897f92;
+    font-size: 11px;
+    font-weight: 700;
+    user-select: none;
+    margin-bottom: 7px;
+  }
+
+  .intent-disclosure summary::-webkit-details-marker {
+    display: none;
   }
 
   .intent-caption {
@@ -2158,7 +2640,7 @@ const styles = `
     right: 16px;
     top: 72px;
     bottom: 16px;
-    width: min(390px, calc(100vw - 32px));
+    width: min(420px, calc(100vw - 32px));
     background: #fff;
     color: var(--text);
     border-radius: 20px;
@@ -2211,6 +2693,14 @@ const styles = `
     display: grid;
     gap: 10px;
     margin-top: 14px;
+  }
+
+  .empty-cart-state {
+    margin-top: 6px;
+    border: 1px dashed var(--line);
+    border-radius: 14px;
+    padding: 12px;
+    background: #fcfbfd;
   }
 
   .cart-item {
@@ -2549,6 +3039,98 @@ const styles = `
   .checkout-error {
     color: #9b1c1c;
     font-weight: 800;
+  }
+
+  .gift-box,
+  .tracking-box,
+  .upsell-box {
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: #fff;
+    padding: 14px;
+    margin-top: 12px;
+  }
+
+  .gift-box-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .gift-box h3,
+  .tracking-box h3,
+  .upsell-box h3 {
+    margin: 0 0 6px;
+    font-size: 14px;
+  }
+
+  .gift-actions {
+    margin-top: 10px;
+    display: flex;
+    gap: 10px;
+  }
+
+  .gift-actions button,
+  .gift-box .ghost-button,
+  .tracking-box .ghost-button {
+    border: 1px solid var(--line);
+    background: var(--kavi-purple-soft);
+    color: var(--kavi-purple);
+    border-radius: 999px;
+    padding: 8px 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .tracking-box label {
+    display: grid;
+    gap: 6px;
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .tracking-box input {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font: inherit;
+  }
+
+  .tracking-result {
+    margin-top: 10px;
+    border-radius: 14px;
+    background: #fbf7ff;
+    border: 1px solid #eadff1;
+    padding: 10px 12px;
+  }
+
+  .tracking-result p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .upsell-rail {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(220px, 1fr);
+    gap: 12px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin-top: 10px;
+  }
+
+  .upsell-box .product-card {
+    min-width: 220px;
+  }
+
+  .checkout-details-form small {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 12px;
   }
 
   .error-note {

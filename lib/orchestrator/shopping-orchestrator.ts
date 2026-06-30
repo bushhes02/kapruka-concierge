@@ -1,7 +1,6 @@
 import "server-only";
 
 import { groupProducts } from "@/lib/commerce/product-grouping";
-import { extractShoppingIntent } from "@/lib/ai/groq-client";
 import { generateKaviAssistantMessage } from "@/lib/ai/gemini-client";
 import type { ShoppingIntent } from "@/lib/ai/intent-schema";
 import { enrichKaprukaProducts } from "@/lib/kapruka/product-enrichment";
@@ -25,37 +24,61 @@ export type DeliveryInfo = {
 };
 
 export async function runShoppingOrchestrator(
-  rawQuery: string
+  intent: ShoppingIntent
 ): Promise<ShoppingOrchestratorResult> {
-  const extractedIntent = await extractShoppingIntent(rawQuery);
-  const delivery = resolveDeliveryInfo(extractedIntent);
-  const intent = {
-    ...extractedIntent,
+  logIntentSummary(intent);
+  const delivery = resolveDeliveryInfo(intent);
+  const resolvedIntent = {
+    ...intent,
     city: delivery.city,
     deliveryDate: delivery.date,
   };
-  const kaprukaQuery = buildKaprukaQuery(intent);
+
+  if (shouldAskClarifyingQuestion(resolvedIntent)) {
+    const groups = groupProducts([], "", {
+      recipient: resolvedIntent.recipientNormalized || resolvedIntent.recipient,
+      requestText: getIntentText(resolvedIntent),
+    });
+    const assistantMessage = await generateKaviAssistantMessage({
+      intent: resolvedIntent,
+      delivery,
+      groups,
+    });
+
+    return {
+      intent: resolvedIntent,
+      delivery,
+      assistantMessage,
+      products: [],
+      groups,
+    };
+  }
+
+  const kaprukaQuery = buildKaprukaQuery(resolvedIntent);
   const searchedProducts = await searchKaprukaProducts(kaprukaQuery);
   const relevantProducts = await getRelevantProducts(
     searchedProducts,
-    intent,
+    resolvedIntent,
     kaprukaQuery
   );
-  const products = filterProductsByBudget(relevantProducts, intent);
+  const products = filterProductsByBudget(relevantProducts, resolvedIntent);
   const groups = groupProducts(products, kaprukaQuery, {
-    recipient: intent.recipient,
-    requestText: getIntentText(intent),
+    recipient: resolvedIntent.recipientNormalized || resolvedIntent.recipient,
+    requestText: getIntentText(resolvedIntent),
   });
   const { products: enrichedProducts, groups: enrichedGroups } =
     await enrichVisibleProducts(products, groups);
+  const assistantIntent = hasGroupedProducts(enrichedGroups)
+    ? { ...resolvedIntent, clarificationNeeded: false }
+    : resolvedIntent;
   const assistantMessage = await generateKaviAssistantMessage({
-    intent,
+    intent: assistantIntent,
     delivery,
     groups: enrichedGroups,
   });
 
   return {
-    intent,
+    intent: assistantIntent,
     delivery,
     assistantMessage,
     products: enrichedProducts,
@@ -63,8 +86,45 @@ export async function runShoppingOrchestrator(
   };
 }
 
+function logIntentSummary(intent: ShoppingIntent) {
+  if (process.env.NODE_ENV !== "development") {
+    return;
+  }
+
+  console.info("Kavi intent", {
+    extractor: intent.intentProvider || "unknown",
+    languageStyle: intent.languageStyle,
+    translatedShoppingRequestEnglish: intent.translatedShoppingRequestEnglish,
+    searchQueryEnglish: intent.searchQueryEnglish,
+    category: intent.category,
+    confidence: intent.confidence,
+  });
+}
+
 function buildKaprukaQuery(intent: ShoppingIntent) {
-  return intent.category || intent.searchQuery || intent.rawQuery;
+  return (
+    intent.searchQueryEnglish ||
+    intent.query ||
+    intent.searchQuery ||
+    intent.category ||
+    intent.translatedShoppingRequestEnglish ||
+    intent.rawQuery
+  );
+}
+
+function shouldAskClarifyingQuestion(intent: ShoppingIntent) {
+  return (
+    intent.clarificationNeeded &&
+    !intent.searchQueryEnglish &&
+    !intent.query &&
+    !intent.searchQuery &&
+    !intent.category &&
+    intent.confidence < 0.7
+  );
+}
+
+function hasGroupedProducts(groups: ReturnType<typeof groupProducts>) {
+  return groups.some((group) => Boolean(group.product));
 }
 
 async function enrichVisibleProducts(
@@ -150,9 +210,8 @@ function filterProductsByBudget(
 }
 
 function resolveDeliveryInfo(intent: ShoppingIntent): DeliveryInfo {
-  const requestText = getIntentText(intent);
-  const city = normalizeCity(intent.city) || extractCityFromRequest(intent.rawQuery);
-  const date = resolveDeliveryDate(intent.deliveryDate, requestText);
+  const city = normalizeCity(intent.city);
+  const date = resolveDeliveryDate(intent.deliveryDate, intent.deliveryDateRaw);
   const missingFields: DeliveryInfo["missingFields"] = [];
 
   if (!city) {
@@ -181,22 +240,31 @@ function formatMissingDeliveryFields(fields: DeliveryInfo["missingFields"]) {
     .join(" and ");
 }
 
-function resolveDeliveryDate(groqDate: string | null, requestText: string) {
+function resolveDeliveryDate(
+  groqDate: string | null,
+  requestText: string | null
+) {
   const today = getLocalDateOnly(new Date());
 
-  if (requestText.includes("day after tomorrow")) {
+  const normalized = normalize(requestText);
+
+  if (normalized.includes("day after tomorrow")) {
     return formatDate(addDays(today, 2));
   }
 
-  if (requestText.includes("tomorrow")) {
+  if (normalized.includes("tomorrow")) {
     return formatDate(addDays(today, 1));
   }
 
-  if (requestText.includes("today")) {
+  if (normalized.includes("today")) {
     return formatDate(today);
   }
 
-  const requestIsoDate = extractIsoDate(requestText);
+  if (normalized.includes("friday")) {
+    return formatDate(nextWeekday(today, 5));
+  }
+
+  const requestIsoDate = extractIsoDate(normalized);
 
   if (requestIsoDate && !isBeforeDate(requestIsoDate, today)) {
     return formatDate(requestIsoDate);
@@ -218,6 +286,14 @@ function getLocalDateOnly(date: Date) {
 function addDays(date: Date, days: number) {
   const nextDate = new Date(date);
   nextDate.setDate(nextDate.getDate() + days);
+  return nextDate;
+}
+
+function nextWeekday(date: Date, weekday: number) {
+  const nextDate = new Date(date);
+  const daysUntilWeekday = (weekday - date.getDay() + 7) % 7 || 7;
+
+  nextDate.setDate(date.getDate() + daysUntilWeekday);
   return nextDate;
 }
 
@@ -273,24 +349,12 @@ function normalizeCity(value: string | null) {
   return toTitleCase(value);
 }
 
-function extractCityFromRequest(rawQuery: string) {
-  const match = rawQuery.match(
-    /\b(?:to|in|near)\s+([a-zA-Z][a-zA-Z\s]+?)(?=\s+(?:today|tomorrow|day after tomorrow|on\s+\d{4}-\d{1,2}-\d{1,2})\b|$|[,.!?])/
-  );
-
-  if (!match?.[1]) {
-    return null;
-  }
-
-  return toTitleCase(match[1]);
-}
-
 function toTitleCase(value: string) {
   return value
     .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase()
-    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
 }
 
 type CategoryRule = {
@@ -445,7 +509,19 @@ function buildFallbackQueries(rule: CategoryRule, originalQuery: string) {
 
 function getIntentText(intent: ShoppingIntent) {
   return normalize(
-    [intent.rawQuery, intent.searchQuery, intent.category].filter(Boolean).join(" ")
+    [
+      intent.translatedShoppingRequestEnglish,
+      intent.searchQueryEnglish,
+      intent.query,
+      intent.searchQuery,
+      intent.category,
+      intent.recipient,
+      intent.recipientNormalized,
+      intent.occasion,
+      intent.city,
+    ]
+      .filter(Boolean)
+      .join(" ")
   );
 }
 

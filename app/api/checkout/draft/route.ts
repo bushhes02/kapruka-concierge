@@ -26,6 +26,7 @@ export async function POST(request: Request) {
         deliveryAddress?: unknown;
         senderName?: unknown;
         giftMessage?: unknown;
+        cakeIcingText?: unknown;
       };
     };
     const checkoutDraft = await createCheckoutDraft({

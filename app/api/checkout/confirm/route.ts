@@ -68,6 +68,7 @@ export async function POST(request: Request) {
     const recipientPhone = revalidatedDraft.checkoutDetails.recipientPhone;
     const deliveryAddress = revalidatedDraft.checkoutDetails.deliveryAddress;
     const senderName = revalidatedDraft.checkoutDetails.senderName;
+    const giftMessage = buildGiftMessage(revalidatedDraft.checkoutDetails);
     const missingOrderFields = [
       recipientName ? null : "recipient name",
       recipientPhone ? null : "recipient phone",
@@ -131,7 +132,7 @@ export async function POST(request: Request) {
           name: senderName,
           anonymous: false,
         },
-        gift_message: revalidatedDraft.checkoutDetails.giftMessage,
+        gift_message: giftMessage,
         currency: "LKR",
         response_format: "json",
       },
@@ -272,4 +273,18 @@ function normalizeMcpError(error: string | null) {
   }
 
   return "Please check the checkout details and try again.";
+}
+
+function buildGiftMessage(details: {
+  giftMessage: string | null;
+  cakeIcingText: string | null;
+}) {
+  const giftMessage = details.giftMessage?.trim() || "";
+  const cakeIcingText = details.cakeIcingText?.trim() || "";
+
+  if (giftMessage && cakeIcingText) {
+    return `${giftMessage}\nCake icing: ${cakeIcingText}`;
+  }
+
+  return giftMessage || cakeIcingText || null;
 }
