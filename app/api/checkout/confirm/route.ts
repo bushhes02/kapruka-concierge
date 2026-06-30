@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import {
-  getCheckoutDraftByToken,
+  consumeCheckoutDraftToken,
   revalidateCheckoutDraft,
 } from "@/lib/checkout/checkout-draft";
 import {
@@ -17,7 +17,7 @@ type ConfirmBody = {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as ConfirmBody;
-    const checkoutDraft = getCheckoutDraftByToken(body.confirmationToken);
+    const checkoutDraft = consumeCheckoutDraftToken(body.confirmationToken);
 
     if (!checkoutDraft) {
       return NextResponse.json(
@@ -34,9 +34,9 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           ok: false,
-          status: "delivery_validation_failed",
+          status: "validation_failed",
           message:
-            "Checkout cannot be confirmed until delivery is valid and required fields are complete.",
+            "Checkout cannot be confirmed until delivery and checkout details are complete.",
           checkoutDraft: revalidatedDraft,
         },
         { status: 400 }
@@ -140,25 +140,136 @@ export async function POST(request: Request) {
       "kapruka_create_order",
       orderPayload
     );
+    const checkoutResult = summarizeCreateOrderResult(orderResult);
+
+    if (!checkoutResult.paymentLink) {
+      return NextResponse.json(
+        {
+          ok: false,
+          status: "failed",
+          message: checkoutResult.safeReason
+            ? `Order could not be created. ${checkoutResult.safeReason}`
+            : "Order could not be created. Please check the checkout details and try again.",
+          checkoutDraft: revalidatedDraft,
+          checkoutResult,
+        },
+        { status: 502 }
+      );
+    }
 
     return NextResponse.json({
       ok: true,
-      status: "order_created",
-      message: "Kapruka checkout link created. Open it to complete payment.",
+      status: "success",
+      message: "Order draft created. Complete payment on Kapruka.",
       checkoutDraft: revalidatedDraft,
-      checkoutResult: orderResult,
+      checkoutResult,
     });
   } catch (error) {
-    console.error("Checkout confirm error", error);
+    console.error(
+      "Checkout confirm error",
+      normalizeMcpError(error instanceof Error ? error.message : "Unknown error")
+    );
 
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Checkout confirmation failed.",
+        ok: false,
+        status: "failed",
+        message:
+          "Order could not be created. Please check the checkout details and try again.",
+        error: normalizeMcpError(
+          error instanceof Error ? error.message : "Checkout confirmation failed."
+        ),
       },
-      { status: 500 }
+      { status: 502 }
     );
   }
+}
+
+function summarizeCreateOrderResult(result: unknown) {
+  if (typeof result === "string") {
+    return {
+      paymentLink: null,
+      orderRef: null,
+      expiresAt: null,
+      summary: null,
+      error: normalizeMcpError(result),
+      safeReason: normalizeMcpError(result),
+    };
+  }
+
+  if (!result || typeof result !== "object") {
+    return {
+      paymentLink: null,
+      orderRef: null,
+      expiresAt: null,
+      summary: null,
+      error: "Unexpected Kapruka order response.",
+      safeReason: "Unexpected Kapruka order response.",
+    };
+  }
+
+  const record = result as Record<string, unknown>;
+  const summary = record.summary;
+
+  return {
+    paymentLink: toTrimmedString(record.checkout_url),
+    orderRef:
+      toTrimmedString(record.order_ref) ||
+      toTrimmedString(record.order_number) ||
+      toTrimmedString(record.order_id),
+    expiresAt: toTrimmedString(record.expires_at),
+    summary: summary && typeof summary === "object" ? summary : null,
+    error: normalizeMcpError(toTrimmedString(record.error)),
+    safeReason: normalizeMcpError(toTrimmedString(record.error)),
+  };
+}
+
+function toTrimmedString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeMcpError(error: string | null) {
+  if (!error) {
+    return null;
+  }
+
+  const lower = error.toLowerCase();
+
+  if (
+    lower.includes("delivery.address") ||
+    lower.includes("string_too_short") ||
+    lower.includes("at least 3 characters")
+  ) {
+    return "Delivery address is too short.";
+  }
+
+  if (lower.includes("recipient.phone") || lower.includes("phone")) {
+    return "Recipient phone number is invalid.";
+  }
+
+  if (lower.includes("recipient.name")) {
+    return "Recipient name is incomplete.";
+  }
+
+  if (lower.includes("sender.name")) {
+    return "Sender name is incomplete.";
+  }
+
+  if (lower.includes("city_not_deliverable")) {
+    return "Delivery is not available for this city.";
+  }
+
+  if (lower.includes("date_not_deliverable")) {
+    return "Delivery is not available for this date.";
+  }
+
+  if (lower.includes("product_out_of_stock")) {
+    return "One of the selected products is out of stock.";
+  }
+
+  if (lower.includes("product_not_found")) {
+    return "One of the selected products could not be found.";
+  }
+
+  return "Please check the checkout details and try again.";
 }

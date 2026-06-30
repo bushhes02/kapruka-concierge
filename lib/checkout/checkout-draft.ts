@@ -63,6 +63,7 @@ export type CheckoutDraft = {
   deliveryValidation: DeliveryValidationResult | null;
   checkoutDetails: CheckoutDetails;
   missingFields: string[];
+  validationErrors: string[];
   canConfirm: boolean;
   confirmationToken: string | null;
   warnings: string[];
@@ -84,6 +85,7 @@ export async function createCheckoutDraft(input: {
   pruneExpiredDrafts();
 
   const missingFields: string[] = [];
+  const validationErrors: string[] = [];
   const warnings: string[] = [
     "No order will be placed until you confirm.",
   ];
@@ -129,23 +131,33 @@ export async function createCheckoutDraft(input: {
     warnings.push(...deliveryValidation.warnings);
   }
 
+  const checkoutDetailErrors = validateCheckoutDetails(checkoutDetails);
+
   if (!checkoutDetails.recipientName) {
+    missingFields.push("recipient name");
+  } else if (checkoutDetailErrors.includes("recipient name")) {
     missingFields.push("recipient name");
   }
 
   if (!checkoutDetails.recipientPhone) {
     missingFields.push("recipient phone");
-  } else if (!isValidSriLankaPhone(checkoutDetails.recipientPhone)) {
+  } else if (checkoutDetailErrors.includes("valid recipient phone")) {
     missingFields.push("valid recipient phone");
   }
 
   if (!checkoutDetails.deliveryAddress) {
     missingFields.push("delivery address");
+  } else if (checkoutDetailErrors.includes("delivery address")) {
+    missingFields.push("delivery address");
   }
 
   if (!checkoutDetails.senderName) {
     missingFields.push("sender name");
+  } else if (checkoutDetailErrors.includes("sender name")) {
+    missingFields.push("sender name");
   }
+
+  validationErrors.push(...checkoutDetailErrors.map(getCheckoutDetailErrorMessage));
 
   const subtotal = items.reduce((total, item) => total + item.price, 0);
   const canConfirm =
@@ -158,6 +170,7 @@ export async function createCheckoutDraft(input: {
     deliveryValidation,
     checkoutDetails,
     missingFields,
+    validationErrors,
     canConfirm,
     confirmationToken,
     warnings,
@@ -192,6 +205,31 @@ export function getCheckoutDraftByToken(token: unknown): CheckoutDraft | null {
   return checkoutDraft;
 }
 
+export function consumeCheckoutDraftToken(token: unknown): CheckoutDraft | null {
+  pruneExpiredDrafts();
+
+  if (typeof token !== "string" || !token.trim()) {
+    return null;
+  }
+
+  const storedDraft = draftStore.get(token);
+
+  if (!storedDraft) {
+    return null;
+  }
+
+  if (storedDraft.contentHash !== hashDraftContent(storedDraft)) {
+    draftStore.delete(token);
+    return null;
+  }
+
+  draftStore.delete(token);
+
+  const { createdAt: _createdAt, contentHash: _contentHash, ...checkoutDraft } = storedDraft;
+
+  return checkoutDraft;
+}
+
 export async function revalidateCheckoutDraft(
   draft: CheckoutDraft
 ): Promise<CheckoutDraft> {
@@ -206,11 +244,20 @@ export async function revalidateCheckoutDraft(
   const missingFields = draft.missingFields.filter(
     (field) => field !== "deliverable delivery city/date"
   );
+  const checkoutDetailErrors = validateCheckoutDetails(draft.checkoutDetails);
+  const validationErrors = checkoutDetailErrors.map(getCheckoutDetailErrorMessage);
+
+  for (const field of checkoutDetailErrors) {
+    if (!missingFields.includes(field)) {
+      missingFields.push(field);
+    }
+  }
 
   return {
     ...draft,
     deliveryValidation,
     missingFields,
+    validationErrors,
     canConfirm:
       missingFields.length === 0 && deliveryValidation?.status === "valid",
     warnings: [
@@ -289,6 +336,48 @@ function isValidSriLankaPhone(phone: string) {
   const normalized = phone.replace(/[\s()-]/g, "");
 
   return /^(\+94|0)\d{9}$/.test(normalized) || /^\d{7,15}$/.test(normalized);
+}
+
+export function validateCheckoutDetails(details: CheckoutDetails) {
+  const errors: string[] = [];
+
+  if (!details.recipientName || details.recipientName.trim().length < 2) {
+    errors.push("recipient name");
+  }
+
+  if (!details.recipientPhone || !isValidSriLankaPhone(details.recipientPhone)) {
+    errors.push("valid recipient phone");
+  }
+
+  if (!details.deliveryAddress || details.deliveryAddress.trim().length < 5) {
+    errors.push("delivery address");
+  }
+
+  if (!details.senderName || details.senderName.trim().length < 2) {
+    errors.push("sender name");
+  }
+
+  return errors;
+}
+
+function getCheckoutDetailErrorMessage(field: string) {
+  if (field === "delivery address") {
+    return "Delivery address must be at least 5 characters.";
+  }
+
+  if (field === "recipient name") {
+    return "Recipient name must be at least 2 characters.";
+  }
+
+  if (field === "sender name") {
+    return "Sender name must be at least 2 characters.";
+  }
+
+  if (field === "valid recipient phone") {
+    return "Enter a valid Sri Lankan recipient phone number.";
+  }
+
+  return field;
 }
 
 function hashDraftContent(draft: CheckoutDraft) {

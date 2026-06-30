@@ -88,6 +88,7 @@ type CheckoutDraft = {
   } | null;
   checkoutDetails: CheckoutDetails;
   missingFields: string[];
+  validationErrors: string[];
   canConfirm: boolean;
   confirmationToken: string | null;
   warnings: string[];
@@ -126,6 +127,7 @@ type PipelineStep = "idle" | "understanding" | "searching" | "composing";
 
 type CheckoutController = {
   draft: CheckoutDraft | null;
+  isDraftStale: boolean;
   error: string | null;
   message: string | null;
   result: unknown;
@@ -183,6 +185,11 @@ export function ChatShell() {
   const [isConfirmingCheckout, setIsConfirmingCheckout] = useState(false);
 
   const cartIds = useMemo(() => new Set(cart.map((item) => item.id)), [cart]);
+  const hasStartedShopping = messages.some((message) => message.role === "user");
+  const isCheckoutDraftStale = checkoutDraft
+    ? !areCheckoutDetailsEqual(checkoutDraft.checkoutDetails, checkoutDetails) ||
+      !areCheckoutDeliveryEqual(checkoutDraft.delivery, checkoutDelivery)
+    : false;
   const subtotal = useMemo(
     () =>
       cart.reduce(
@@ -394,7 +401,7 @@ export function ChatShell() {
   }
 
   async function confirmCheckout() {
-    if (!checkoutDraft?.confirmationToken) {
+    if (!checkoutDraft?.confirmationToken || isCheckoutDraftStale) {
       return;
     }
 
@@ -415,7 +422,9 @@ export function ChatShell() {
       const data = (await response.json()) as CheckoutConfirmResponse;
 
       if (!response.ok) {
-        throw new Error(data.error || "Checkout confirmation failed.");
+        setCheckoutMessage(data.message || "Order could not be created yet.");
+        setCheckoutResult(data.checkoutResult || null);
+        throw new Error(data.error || data.message || "Checkout confirmation failed.");
       }
 
       setCheckoutMessage(
@@ -434,6 +443,7 @@ export function ChatShell() {
 
   const checkoutController: CheckoutController = {
     draft: checkoutDraft,
+    isDraftStale: isCheckoutDraftStale,
     error: checkoutError,
     message: checkoutMessage,
     result: checkoutResult,
@@ -473,65 +483,73 @@ export function ChatShell() {
         </div>
       </header>
 
-      <section className="chat-scroll">
-        <div className="chat-column">
-          {messages.map((message) => (
-            message.type === "cart_summary" ? (
-              <InlineCheckoutSummary
-                key={message.id}
-                cart={cart}
-                subtotal={subtotal}
-                checkout={checkoutController}
-              />
-            ) : (
-              <ChatBubble
-                key={message.id}
-                message={message}
-                cartIds={cartIds}
-                onAdd={addToCart}
-                onRemove={removeFromCart}
-              />
-            )
-          ))}
+      {hasStartedShopping ? (
+        <>
+          <section className={cart.length > 0 ? "shopping-workspace with-cart" : "shopping-workspace"}>
+            <div className="chat-scroll">
+              <div className="chat-column">
+                {messages.map((message) => (
+                  message.type === "cart_summary" ? (
+                    <InlineCheckoutSummary
+                      key={message.id}
+                      cart={cart}
+                      subtotal={subtotal}
+                    />
+                  ) : (
+                    <ChatBubble
+                      key={message.id}
+                      message={message}
+                      cartIds={cartIds}
+                      onAdd={addToCart}
+                      onRemove={removeFromCart}
+                    />
+                  )
+                ))}
 
-          {isSearching ? <PipelineStatus activeStep={pipelineStep} /> : null}
-          {error ? <div className="error-note">{error}</div> : null}
-        </div>
-      </section>
+                {isSearching ? <PipelineStatus activeStep={pipelineStep} /> : null}
+                {error ? <div className="error-note">{error}</div> : null}
+              </div>
+            </div>
 
-      <footer className="composer-shell">
-        <div className="composer-inner">
-          <div className="prompt-row">
-            {samplePrompts.map((prompt) => (
-              <button
-                key={prompt}
-                type="button"
-                disabled={isSearching}
-                onClick={() => void sendMessage(prompt)}
-                className="prompt-chip"
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
-          <form
-            className="composer"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void sendMessage(query);
-            }}
-          >
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Ask Kavi for cakes, flowers, hampers..."
+            {cart.length > 0 ? (
+              <aside className="desktop-order-panel">
+                <CartPanelContent
+                  cart={cart}
+                  subtotal={subtotal}
+                  notice={cartNotice}
+                  checkout={checkoutController}
+                  onRemove={removeFromCart}
+                  title="Order summary"
+                />
+              </aside>
+            ) : null}
+          </section>
+
+          <footer className="composer-shell">
+            <Composer
+              query={query}
+              isSearching={isSearching}
+              onQueryChange={setQuery}
+              onSend={sendMessage}
             />
-            <button type="submit" disabled={isSearching}>
-              {isSearching ? "..." : "Send"}
-            </button>
-          </form>
-        </div>
-      </footer>
+          </footer>
+
+          {cart.length > 0 ? (
+            <MobileCartBar
+              count={cart.length}
+              subtotal={subtotal}
+              onOpen={() => setIsCartOpen(true)}
+            />
+          ) : null}
+        </>
+      ) : (
+        <EmptyState
+          query={query}
+          isSearching={isSearching}
+          onQueryChange={setQuery}
+          onSend={sendMessage}
+        />
+      )}
 
       {isCartOpen ? (
         <CartDrawer
@@ -574,6 +592,101 @@ function PipelineComplete() {
     <div className="pipeline complete">
       Understood by Groq <span /> Products from Kapruka <span /> Reply by Gemini
     </div>
+  );
+}
+
+function EmptyState({
+  query,
+  isSearching,
+  onQueryChange,
+  onSend,
+}: {
+  query: string;
+  isSearching: boolean;
+  onQueryChange: (query: string) => void;
+  onSend: (query: string) => void;
+}) {
+  return (
+    <section className="empty-state">
+      <div className="empty-state-inner">
+        <div className="empty-brand">Kavi by Kapruka</div>
+        <h2>What gift are we finding today?</h2>
+        <p>Ask for cakes, flowers, hampers, or gifts with budget and delivery details.</p>
+        <Composer
+          query={query}
+          isSearching={isSearching}
+          onQueryChange={onQueryChange}
+          onSend={onSend}
+          large
+        />
+      </div>
+    </section>
+  );
+}
+
+function Composer({
+  query,
+  isSearching,
+  onQueryChange,
+  onSend,
+  large = false,
+}: {
+  query: string;
+  isSearching: boolean;
+  onQueryChange: (query: string) => void;
+  onSend: (query: string) => void;
+  large?: boolean;
+}) {
+  return (
+    <div className={large ? "composer-inner large" : "composer-inner"}>
+      <form
+        className="composer"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSend(query);
+        }}
+      >
+        <input
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder="Ask Kavi for cakes, flowers, hampers..."
+        />
+        <button type="submit" disabled={isSearching}>
+          {isSearching ? "..." : "Send"}
+        </button>
+      </form>
+      <div className="prompt-row">
+        {samplePrompts.map((prompt) => (
+          <button
+            key={prompt}
+            type="button"
+            disabled={isSearching}
+            onClick={() => onSend(prompt)}
+            className="prompt-chip"
+          >
+            {prompt}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MobileCartBar({
+  count,
+  subtotal,
+  onOpen,
+}: {
+  count: number;
+  subtotal: number;
+  onOpen: () => void;
+}) {
+  return (
+    <button type="button" className="mobile-cart-bar" onClick={onOpen}>
+      <span>{count} item(s)</span>
+      <strong>Rs. {subtotal.toLocaleString("en-LK")}</strong>
+      <em>Review order</em>
+    </button>
   );
 }
 
@@ -710,54 +823,25 @@ function GroupedProducts({
 function InlineCheckoutSummary({
   cart,
   subtotal,
-  checkout,
 }: {
   cart: Product[];
   subtotal: number;
-  checkout: CheckoutController;
 }) {
-  const missingDeliveryWarnings = getCheckoutDeliveryWarnings(checkout.deliveryDetails);
-
   return (
     <article className="message assistant inline-checkout-message">
       <div className="avatar">K</div>
       <div className="message-body">
-        <div className="inline-checkout-card">
+        <div className="inline-checkout-card compact-note">
           <div className="inline-checkout-head">
             <div>
-              <p className="eyebrow">Cart draft</p>
-              <h2>I’ve added this to your cart. Here’s your current order draft.</h2>
+              <p className="eyebrow">Added to cart</p>
+              <h2>I’ve opened your order summary on the right.</h2>
             </div>
             <strong>Rs. {subtotal.toLocaleString("en-LK")}</strong>
           </div>
-
-          <div className="inline-cart-list">
-            {cart.map((product) => (
-              <div key={product.id} className="inline-cart-item">
-                <span>{getProductDisplayName(product)}</span>
-                <strong>{product.priceText}</strong>
-              </div>
-            ))}
-          </div>
-
-          <div className="inline-delivery">
-            <span>Delivery</span>
-            <p>
-              City: {checkout.deliveryDetails.city || "Missing"} · Date:{" "}
-              {checkout.deliveryDetails.date || "Missing"}
-            </p>
-            {missingDeliveryWarnings.map((warning) => (
-              <p key={warning} className="warning">
-                {warning}
-              </p>
-            ))}
-          </div>
-
-          <CheckoutPanel
-            checkout={checkout}
-            compact
-            cartLength={cart.length}
-          />
+          <p className="handoff-note">
+            {cart.length} item(s) selected. Keep browsing products while checkout stays visible.
+          </p>
         </div>
       </div>
     </article>
@@ -779,61 +863,90 @@ function CartDrawer({
   onClose: () => void;
   onRemove: (productId: string) => void;
 }) {
-  const missingDeliveryWarnings = getCheckoutDeliveryWarnings(checkout.deliveryDetails);
-
   return (
     <div className="drawer-layer">
       <button className="drawer-backdrop" type="button" onClick={onClose} aria-label="Close cart" />
       <aside className="cart-drawer">
-        <div className="drawer-header">
-          <div>
-            <h2>Cart</h2>
-            <p>{cart.length} selected item(s)</p>
-          </div>
+        <CartPanelContent
+          cart={cart}
+          subtotal={subtotal}
+          notice={notice}
+          checkout={checkout}
+          onRemove={onRemove}
+          title="Cart"
+          onClose={onClose}
+        />
+      </aside>
+    </div>
+  );
+}
+
+function CartPanelContent({
+  cart,
+  subtotal,
+  notice,
+  checkout,
+  onRemove,
+  title,
+  onClose,
+}: {
+  cart: Product[];
+  subtotal: number;
+  notice: string | null;
+  checkout: CheckoutController;
+  onRemove: (productId: string) => void;
+  title: string;
+  onClose?: () => void;
+}) {
+  const missingDeliveryWarnings = getCheckoutDeliveryWarnings(checkout.deliveryDetails);
+
+  return (
+    <>
+      <div className="drawer-header">
+        <div>
+          <h2>{title}</h2>
+          <p>{cart.length} selected item(s)</p>
+        </div>
+        {onClose ? (
           <button type="button" onClick={onClose} className="ghost-button">
             Close
           </button>
+        ) : null}
+      </div>
+
+      {notice ? <p className="cart-notice">{notice}</p> : null}
+
+      {cart.length === 0 ? (
+        <p className="empty-cart">Add products from Kavi's recommendations to review them here.</p>
+      ) : (
+        <div className="cart-items">
+          {cart.map((product) => (
+            <CartItem key={product.id} product={product} onRemove={onRemove} />
+          ))}
+        </div>
+      )}
+
+      <div className="cart-summary">
+        <div className="subtotal-row">
+          <span>Subtotal</span>
+          <strong>Rs. {subtotal.toLocaleString("en-LK")}</strong>
+        </div>
+        <div className="delivery-box">
+          <h3>Delivery summary</h3>
+          <p>
+            City: {checkout.deliveryDetails.city || "Missing"} · Date:{" "}
+            {checkout.deliveryDetails.date || "Missing"}
+          </p>
+          {missingDeliveryWarnings.map((warning) => (
+            <p key={warning} className="warning">
+              {warning}
+            </p>
+          ))}
         </div>
 
-        {notice ? <p className="cart-notice">{notice}</p> : null}
-
-        {cart.length === 0 ? (
-          <p className="empty-cart">Add products from Kavi's recommendations to review them here.</p>
-        ) : (
-          <div className="cart-items">
-            {cart.map((product) => (
-              <CartItem key={product.id} product={product} onRemove={onRemove} />
-            ))}
-          </div>
-        )}
-
-        <div className="cart-summary">
-          <div className="subtotal-row">
-            <span>Subtotal</span>
-            <strong>Rs. {subtotal.toLocaleString("en-LK")}</strong>
-          </div>
-          <div className="delivery-box">
-            <h3>Delivery summary</h3>
-            <p>
-              City: {checkout.deliveryDetails.city || "Missing"} · Date:{" "}
-              {checkout.deliveryDetails.date || "Missing"}
-            </p>
-            {missingDeliveryWarnings.map((warning) => (
-              <p key={warning} className="warning">
-                {warning}
-              </p>
-            ))}
-          </div>
-          {cart.length > 1 ? (
-            <p className="handoff-note">
-              For this prototype, open each selected product on Kapruka to complete checkout.
-            </p>
-          ) : null}
-
-          <CheckoutPanel checkout={checkout} cartLength={cart.length} />
-        </div>
-      </aside>
-    </div>
+        <CheckoutPanel checkout={checkout} cartLength={cart.length} />
+      </div>
+    </>
   );
 }
 
@@ -847,6 +960,7 @@ function CheckoutPanel({
   compact?: boolean;
 }) {
   const needsCheckoutDetails =
+    checkout.isDraftStale ||
     checkout.draft?.missingFields.some((field) =>
       [
         "recipient name",
@@ -856,6 +970,8 @@ function CheckoutPanel({
         "sender name",
       ].includes(field)
     ) || false;
+  const showCheckoutDetailsForm =
+    needsCheckoutDetails || !isCheckoutDetailsLocallyComplete(checkout.details);
   const needsDeliveryCorrection =
     checkout.draft?.deliveryValidation?.status === "invalid" ||
     checkout.draft?.deliveryValidation?.status === "unavailable";
@@ -865,16 +981,15 @@ function CheckoutPanel({
       <p className="confirmation-gate">
         No order will be placed until you confirm.
       </p>
-      <button
-        type="button"
-        className="review-button"
-        onClick={checkout.onReview}
-        disabled={checkout.isReviewing || cartLength === 0}
-      >
-        {checkout.isReviewing ? "Reviewing..." : "Review checkout"}
-      </button>
 
       {checkout.error ? <p className="checkout-error">{checkout.error}</p> : null}
+
+      {!checkout.draft && showCheckoutDetailsForm ? (
+        <CheckoutDetailsForm
+          details={checkout.details}
+          onChange={checkout.onDetailsChange}
+        />
+      ) : null}
 
       {checkout.draft ? (
         <div className="checkout-draft">
@@ -945,11 +1060,25 @@ function CheckoutPanel({
               Missing: {checkout.draft.missingFields.join(", ")}.
             </p>
           ) : null}
+          {checkout.draft.validationErrors?.map((validationError) => (
+            <p key={validationError} className="warning">
+              {validationError}
+            </p>
+          ))}
           <p className="details-status">
             Checkout details:{" "}
-            {needsCheckoutDetails ? "needed before confirmation" : "complete"}
+            {checkout.isDraftStale
+              ? "incomplete - review checkout after edits"
+              : needsCheckoutDetails
+                ? "incomplete"
+                : "complete"}
           </p>
-          {needsCheckoutDetails ? (
+          {checkout.isDraftStale ? (
+            <p className="warning">
+              Review checkout again before confirming these updated details.
+            </p>
+          ) : null}
+          {showCheckoutDetailsForm ? (
             <CheckoutDetailsForm
               details={checkout.details}
               onChange={checkout.onDetailsChange}
@@ -960,7 +1089,7 @@ function CheckoutPanel({
               {warning}
             </p>
           ))}
-          {checkout.draft.canConfirm ? (
+          {checkout.draft.canConfirm && !checkout.isDraftStale ? (
             <button
               type="button"
               className="confirm-button"
@@ -973,13 +1102,26 @@ function CheckoutPanel({
         </div>
       ) : null}
 
+      <button
+        type="button"
+        className="review-button"
+        onClick={checkout.onReview}
+        disabled={checkout.isReviewing || cartLength === 0}
+      >
+        {checkout.isReviewing ? "Checking..." : "Check delivery & review order"}
+      </button>
+
       {checkout.message ? (
         <p className="checkout-message">{checkout.message}</p>
       ) : null}
       {getCheckoutUrl(checkout.result) ? (
         <div className="payment-link-box">
+          <strong>Order draft created. Complete payment on Kapruka.</strong>
+          {getCheckoutOrderRef(checkout.result) ? (
+            <p>Order reference: {getCheckoutOrderRef(checkout.result)}</p>
+          ) : null}
           <a href={getCheckoutUrl(checkout.result) || "#"} target="_blank" rel="noreferrer">
-            Open Kapruka payment link
+            Open payment link
           </a>
           {getCheckoutExpiry(checkout.result) ? (
             <p>Expires: {getCheckoutExpiry(checkout.result)}</p>
@@ -1097,7 +1239,7 @@ function CheckoutDetailsForm({
           maxLength={300}
         />
       </label>
-      <p className="handoff-note">Click Review checkout again after saving details.</p>
+      <p className="handoff-note">Click Check delivery & review order after saving details.</p>
     </div>
   );
 }
@@ -1243,6 +1385,38 @@ function getCheckoutDeliveryWarnings(delivery: CheckoutDeliveryDetails) {
   return warnings;
 }
 
+function areCheckoutDetailsEqual(
+  draftDetails: CheckoutDraft["checkoutDetails"],
+  currentDetails: CheckoutDetails
+) {
+  return (
+    (draftDetails.recipientName || "") === currentDetails.recipientName.trim() &&
+    (draftDetails.recipientPhone || "") === currentDetails.recipientPhone.trim() &&
+    (draftDetails.deliveryAddress || "") === currentDetails.deliveryAddress.trim() &&
+    (draftDetails.senderName || "") === currentDetails.senderName.trim() &&
+    (draftDetails.giftMessage || "") === currentDetails.giftMessage.trim()
+  );
+}
+
+function areCheckoutDeliveryEqual(
+  draftDelivery: CheckoutDraft["delivery"],
+  currentDelivery: CheckoutDeliveryDetails
+) {
+  return (
+    (draftDelivery.city || "") === currentDelivery.city.trim() &&
+    (draftDelivery.date || "") === currentDelivery.date.trim()
+  );
+}
+
+function isCheckoutDetailsLocallyComplete(details: CheckoutDetails) {
+  return (
+    details.recipientName.trim().length >= 2 &&
+    details.recipientPhone.trim().length >= 7 &&
+    details.deliveryAddress.trim().length >= 5 &&
+    details.senderName.trim().length >= 2
+  );
+}
+
 function formatDeliveryValidationStatus(
   status: "valid" | "invalid" | "unavailable",
   city: string | null,
@@ -1267,7 +1441,7 @@ function getCheckoutUrl(result: unknown) {
   }
 
   const record = result as Record<string, unknown>;
-  const checkoutUrl = record.checkout_url;
+  const checkoutUrl = record.paymentLink || record.checkout_url;
 
   return typeof checkoutUrl === "string" && checkoutUrl.trim()
     ? checkoutUrl.trim()
@@ -1280,10 +1454,23 @@ function getCheckoutExpiry(result: unknown) {
   }
 
   const record = result as Record<string, unknown>;
-  const expiresAt = record.expires_at;
+  const expiresAt = record.expiresAt || record.expires_at;
 
   return typeof expiresAt === "string" && expiresAt.trim()
     ? expiresAt.trim()
+    : null;
+}
+
+function getCheckoutOrderRef(result: unknown) {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  const record = result as Record<string, unknown>;
+  const orderRef = record.orderRef || record.order_ref || record.order_number;
+
+  return typeof orderRef === "string" && orderRef.trim()
+    ? orderRef.trim()
     : null;
 }
 
@@ -1404,6 +1591,70 @@ const styles = `
   .chat-scroll {
     min-height: 0;
     overflow-y: auto;
+  }
+
+  .empty-state {
+    min-height: 0;
+    display: grid;
+    place-items: center;
+    padding: 48px 18px 86px;
+  }
+
+  .empty-state-inner {
+    width: min(760px, 100%);
+    text-align: center;
+    display: grid;
+    gap: 14px;
+  }
+
+  .empty-brand {
+    color: var(--kavi-purple);
+    font-size: 13px;
+    font-weight: 900;
+  }
+
+  .empty-state h2 {
+    margin: 0;
+    color: var(--text);
+    font-size: clamp(28px, 5vw, 46px);
+    line-height: 1.08;
+  }
+
+  .empty-state p {
+    margin: 0 auto 8px;
+    max-width: 520px;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+
+  .shopping-workspace {
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shopping-workspace.with-cart {
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+    gap: 18px;
+    max-width: 1360px;
+    width: 100%;
+    margin: 0 auto;
+    padding-right: 18px;
+  }
+
+  .desktop-order-panel {
+    position: sticky;
+    top: 74px;
+    align-self: start;
+    max-height: calc(100vh - 96px);
+    overflow-y: auto;
+    margin: 18px 0;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    box-shadow: 0 16px 42px rgba(54, 30, 74, 0.08);
+    padding: 16px;
   }
 
   .chat-column {
@@ -1799,11 +2050,17 @@ const styles = `
     margin: 0 auto;
   }
 
+  .composer-inner.large {
+    max-width: 760px;
+    width: 100%;
+  }
+
   .prompt-row {
     display: flex;
     gap: 8px;
     overflow-x: auto;
-    padding-bottom: 9px;
+    padding: 9px 0 0;
+    justify-content: center;
   }
 
   .prompt-chip {
@@ -1826,6 +2083,39 @@ const styles = `
     border-radius: 22px;
     padding: 8px;
     box-shadow: 0 14px 38px rgba(54, 30, 74, 0.08);
+  }
+
+  .mobile-cart-bar {
+    display: none;
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 78px;
+    z-index: 35;
+    border: 1px solid #e2d3eb;
+    border-radius: 999px;
+    background: #fff;
+    color: var(--text);
+    box-shadow: 0 14px 42px rgba(54, 30, 74, 0.18);
+    padding: 11px 13px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .mobile-cart-bar span,
+  .mobile-cart-bar em {
+    color: var(--muted);
+    font-size: 12px;
+    font-style: normal;
+    font-weight: 800;
+  }
+
+  .mobile-cart-bar strong {
+    color: var(--kavi-purple);
+    font-size: 14px;
   }
 
   .composer input {
@@ -2238,8 +2528,16 @@ const styles = `
   }
 
   .payment-link-box a {
+    display: inline-block;
+    margin-top: 8px;
     color: var(--kavi-purple);
     font-weight: 900;
+  }
+
+  .payment-link-box strong {
+    display: block;
+    color: var(--text);
+    font-size: 13px;
   }
 
   .payment-link-box p {
@@ -2264,6 +2562,19 @@ const styles = `
   }
 
   @media (max-width: 820px) {
+    .shopping-workspace.with-cart {
+      grid-template-columns: minmax(0, 1fr);
+      padding-right: 0;
+    }
+
+    .desktop-order-panel {
+      display: none;
+    }
+
+    .mobile-cart-bar {
+      display: flex;
+    }
+
     .chat-column {
       padding: 20px 12px 26px;
     }
